@@ -63,7 +63,6 @@ def train(model, device, criterion, epochs: int=1, learning_rate: float=1e-5, ba
     """
     
     transform = transforms.Compose([
-        # transforms.Resize((120, 120)),
         transforms.RandomHorizontalFlip(),
         transforms.RandomRotation(degrees=20),
         transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
@@ -72,11 +71,11 @@ def train(model, device, criterion, epochs: int=1, learning_rate: float=1e-5, ba
         ])
     
     # Use the 70/20 split directories for training and validation
-    train_img_dir = "processed_data/70/img"
-    train_mask_dir = "processed_data/70/mask"
-    val_img_dir = "processed_data/20/img"
-    val_mask_dir = "processed_data/20/mask"
-    
+    train_img_dir = "data/processed_data/train/img"
+    train_mask_dir = "data/processed_data/train/mask"
+    val_img_dir = "data/processed_data/val/img"
+    val_mask_dir = "data/processed_data/val/mask"
+
     # Get all files from the training directory (70% split)
     train_img_files = sorted([os.path.join(train_img_dir, f) for f in os.listdir(train_img_dir) if (f.endswith(".png"))])
     train_mask_files = sorted([os.path.join(train_mask_dir, f) for f in os.listdir(train_mask_dir) if f.endswith(".png")])
@@ -236,7 +235,7 @@ def validate(model, val_loader, criterion, device, epoch, epochs):
 
 if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    """
+    
     # Train BU_Net (teacher) from scratch and save weights
     unet_model = BU_Net(n_channels=3)
     unet_model = unet_model.to(device, memory_format=torch.channels_last)
@@ -267,4 +266,4 @@ if __name__ == '__main__':
     trained_model = train(student_model, device, criterion, epochs=30, learning_rate=1e-5, batch_size=8, teacher_model=teacher_model, distill_alpha=0.5, distill_temp=2.0)
     torch.save(trained_model.state_dict(), 'models/MU_Net_distilled.pth')
     print("MU_Net (student) weights saved to models/MU_Net_distilled.pth")
-    
+    """

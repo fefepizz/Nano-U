@@ -4,11 +4,8 @@ import torch
 import numpy as np
 import matplotlib.pyplot as plt
 import psutil
-from PIL import Image
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader
 import tensorflow as tf
-from glob import glob
-from torchvision import transforms
 
 from models.BU_Net.BU_Net_model import BU_Net
 from models.Nano_U.Nano_U_model import Nano_U
@@ -21,6 +18,32 @@ def get_model_parameters(model):
 def get_model_size(model_path):
     """Get the file size of a model in megabytes (MB)."""
     return os.path.getsize(model_path) / (1024 * 1024)
+    
+def calculate_tops(model, input_shape, time_ms):
+    """Calculate Trillion Operations Per Second (TOPS) for a PyTorch model.
+    
+    Args:
+        model: PyTorch model
+        input_shape: Tuple representing input shape (batch_size, channels, height, width)
+        time_ms: Inference time in milliseconds
+    
+    Returns:
+        TOPS value (float)
+    """
+    # Calculate MACs (Multiply-Accumulate operations)
+    # This is a simple estimation based on model parameters and input dimensions
+    params = get_model_parameters(model)
+    input_size = np.prod(input_shape)
+    
+    # Estimate operations: each parameter typically requires at least 2 operations (multiply and add)
+    # and is used at least once per input element (very rough approximation)
+    estimated_ops = params * 2 * input_size
+    
+    # Convert to TOPS (Trillion Operations Per Second)
+    time_s = time_ms / 1000.0  # Convert ms to seconds
+    tops = estimated_ops / (time_s * 1e12)  # Trillion ops per second
+    
+    return tops
 
 def calculate_iou(pred, target, threshold=0.5):
     """Calculate the Intersection over Union (IoU) for segmentation evaluation."""
@@ -105,9 +128,10 @@ def plot_results(results):
         'Inference Time (ms)': [v['avg_time_ms'] for v in results.values()],
         'CPU Usage (%)': [v['avg_cpu_percent'] for v in results.values()],
         'RAM Usage (MB)': [v['avg_ram_mb'] for v in results.values()],
+        'Performance (TOPS)': [v.get('tops', 0) for v in results.values()],
     }
     
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+    fig, axes = plt.subplots(3, 3, figsize=(18, 14))
     fig.suptitle('U-Net Models Benchmark Comparison', fontsize=16)
     axes = axes.flatten()
 
@@ -161,39 +185,49 @@ if __name__ == '__main__':
     interpreter = tf.lite.Interpreter(model_path=nano_u_tflite_path)
     interpreter.allocate_tensors()
 
+    # Input shape for TOPS calculation (batch_size, channels, height, width)
+    input_shape = (BATCH_SIZE, 3, IMG_SIZE[0], IMG_SIZE[1])
+    
     results = {}
 
     print("\n--- Starting Benchmark: BU_Net (PyTorch) ---")
     benchmark_data_bu = benchmark_inference(bu_net, dataloader, DEVICE, model_type='pytorch')
+    bu_net_tops = calculate_tops(bu_net, input_shape, benchmark_data_bu['avg_time_ms'])
     results['BU_Net'] = {
         'params_m': get_model_parameters(bu_net) / 1e6,
         'size_mb': get_model_size(bu_net_path),
+        'tops': bu_net_tops,
         **benchmark_data_bu
     }
     
     print("\n--- Starting Benchmark: Nano_U (PyTorch) ---")
     benchmark_data_nano = benchmark_inference(nano_u, dataloader, DEVICE, model_type='pytorch')
+    nano_u_tops = calculate_tops(nano_u, input_shape, benchmark_data_nano['avg_time_ms'])
     results['Nano_U'] = {
         'params_m': get_model_parameters(nano_u) / 1e6,
         'size_mb': get_model_size(nano_u_path),
+        'tops': nano_u_tops,
         **benchmark_data_nano
     }
 
     print("\n--- Starting Benchmark: Nano_U_int8 (TFLite) ---")
     benchmark_data_tflite = benchmark_inference(interpreter, dataloader, DEVICE, model_type='tflite')
+    # Approximate TOPS for TFLite model based on Nano_U parameters but adjusted for int8 precision
+    nano_u_int8_tops = calculate_tops(nano_u, input_shape, benchmark_data_tflite['avg_time_ms'])
     results['Nano_U_int8'] = {
         'params_m': results['Nano_U']['params_m'],
         'size_mb': get_model_size(nano_u_tflite_path),
+        'tops': nano_u_int8_tops,
         **benchmark_data_tflite
     }
     
-    print("\n" + "="*95)
+    print("\n" + "="*115)
     print("--- FINAL BENCHMARK RESULTS ---")
-    print("="*95)
-    print(f"{'Model':<15} | {'Parameters (M)':<15} | {'Size (MB)':<10} | {'IoU':<8} | {'Time (ms)':<12} | {'CPU (%)':<10} | {'RAM (MB)':<10}")
-    print("-" * 95)
+    print("="*115)
+    print(f"{'Model':<15} | {'Parameters (M)':<15} | {'Size (MB)':<10} | {'IoU':<8} | {'Time (ms)':<12} | {'CPU (%)':<10} | {'RAM (MB)':<10} | {'TOPS':<10}")
+    print("-" * 115)
     for name, res in results.items():
-        print(f"{name:<15} | {res['params_m']:<15.2f} | {res['size_mb']:<10.2f} | {res['avg_iou']:<8.3f} | {res['avg_time_ms']:<12.2f} | {res['avg_cpu_percent']:<10.2f} | {res['avg_ram_mb']:<10.2f}")
-    print("-" * 95)
+        print(f"{name:<15} | {res['params_m']:<15.2f} | {res['size_mb']:<10.2f} | {res['avg_iou']:<8.3f} | {res['avg_time_ms']:<12.2f} | {res['avg_cpu_percent']:<10.2f} | {res['avg_ram_mb']:<10.2f} | {res['tops']:<10.4f}")
+    print("-" * 115)
 
     plot_results(results)

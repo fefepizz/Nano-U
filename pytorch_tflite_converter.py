@@ -9,15 +9,13 @@ which is optimized for mobile and edge devices. The conversion process includes:
 4. Applying dynamic quantization to reduce model size
 5. Verifying the quantized model works correctly
 
-Author: fefepizz
-Date: August 31, 2025
 """
 
 import os
 import torch
-import onnx
 import tensorflow as tf
 from models.Nano_U import Nano_U
+import onnx2tf
 
 
 def load_model(pth_path):
@@ -58,18 +56,17 @@ def export_to_onnx(model, onnx_path, input_shape=(1, 3, 64, 48)):
     )
 
 
-def convert_onnx_to_tflite_dynamic_quantization(onnx_path, tflite_path):
+def convert_onnx_to_tf(onnx_path, tf_model_path="tf_model"):
     """
-    Convert an ONNX model to TFLite format with dynamic quantization.
+    Convert an ONNX model to TensorFlow saved model format.
     
     Args:
         onnx_path (str): Path to the ONNX model
-        tflite_path (str): Output path for the TFLite model
-    """
-    import onnx2tf
+        tf_model_path (str): Output directory for the TensorFlow model
     
-    # Temporary directory for the TensorFlow model
-    tf_model_path = "tf_model"
+    Returns:
+        str: Path to the converted TensorFlow model
+    """
     
     # Convert ONNX to TensorFlow format
     onnx2tf.convert(
@@ -77,7 +74,18 @@ def convert_onnx_to_tflite_dynamic_quantization(onnx_path, tflite_path):
         output_folder_path=tf_model_path,
         copy_onnx_input_output_names_to_tflite=True,
     )
+    
+    return tf_model_path
 
+
+def apply_dynamic_quantization(tf_model_path, tflite_path):
+    """
+    Apply dynamic quantization to a TensorFlow model and save as TFLite.
+    
+    Args:
+        tf_model_path (str): Path to the TensorFlow saved model
+        tflite_path (str): Output path for the quantized TFLite model
+    """
     # Apply dynamic quantization
     converter = tf.lite.TFLiteConverter.from_saved_model(tf_model_path)
     converter.optimizations = [tf.lite.Optimize.DEFAULT]
@@ -128,24 +136,28 @@ if __name__ == "__main__":
     Steps:
     1. Load the PyTorch model from disk
     2. Convert to ONNX format
-    3. Convert ONNX to TFLite with dynamic quantization
-    4. Verify the quantized model works correctly
+    3. Convert ONNX to TensorFlow format
+    4. Apply dynamic quantization to TensorFlow model and save as TFLite
+    5. Verify the quantized model works correctly
     """
     # Define file paths
-    pth_model_path = "models/MU_Net_distilled.pth"
-    onnx_model_path = "models/MU_Net.onnx"
-    tflite_model_path = "models/MU_Net_quantized.tflite"
-    
+    pth_model_path = "models/Nano_U.pth"
+    onnx_model_path = "models/Nano_U.onnx"
+    tflite_model_path = "models/Nano_U_quantized.tflite"
+
     # Step 1: Load the PyTorch model
     model = load_model(pth_model_path)
     
     # Step 2: Export to ONNX format
     export_to_onnx(model, onnx_model_path)
     
-    # Step 3: Convert to TFLite with dynamic quantization
-    convert_onnx_to_tflite_dynamic_quantization(onnx_model_path, tflite_model_path)
+    # Step 3: Convert ONNX to TensorFlow format
+    tf_model_path = convert_onnx_to_tf(onnx_model_path)
     
-    # Step 4: Verify the quantized model
+    # Step 4: Apply dynamic quantization and save as TFLite
+    apply_dynamic_quantization(tf_model_path, tflite_model_path)
+    
+    # Step 5: Verify the quantized model
     verify_quantized_model(tflite_model_path)
     
-    print(f"Conversion completed: {pth_model_path} → {tflite_model_path}")
+    print(f"Conversion completed: {pth_model_path} -> {tflite_model_path}")

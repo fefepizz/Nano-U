@@ -1,0 +1,6 @@
+Cross-Validation Results (5 folds):
+Average Train Loss: 0.2354
+Average Train Accuracy: 0.9326
+Average Validation Loss: 0.2601
+Average Validation Accuracy: 0.9218
+Best Validation Accuracy: 0.9312

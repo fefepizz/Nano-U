@@ -235,7 +235,7 @@ def validate(model, val_loader, criterion, device, epoch, epochs):
 
 if __name__ == '__main__':
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    
+    """
     # Train BU_Net (teacher) from scratch and save weights
     unet_model = BU_Net(n_channels=3)
     unet_model = unet_model.to(device, memory_format=torch.channels_last)
@@ -262,8 +262,8 @@ if __name__ == '__main__':
     # Define loss function
     criterion = nn.BCEWithLogitsLoss()
 
-    # Train MU_Net with distillation from BU_Net
-    trained_model = train(student_model, device, criterion, epochs=30, learning_rate=1e-5, batch_size=8, teacher_model=teacher_model, distill_alpha=0.5, distill_temp=2.0)
-    torch.save(trained_model.state_dict(), 'models/MU_Net_distilled.pth')
-    print("MU_Net (student) weights saved to models/MU_Net_distilled.pth")
-    """
+    # Train Nano-U with distillation from BU_Net
+    trained_model = train(student_model, device, criterion, epochs=80, learning_rate=1e-6, batch_size=8, teacher_model=teacher_model, distill_alpha=0.5, distill_temp=2.0)
+    torch.save(trained_model.state_dict(), 'models/Nano-U.pth')
+    print("Nano-U (student) weights saved to models/Nano-U.pth")
+    

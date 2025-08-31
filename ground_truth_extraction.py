@@ -127,7 +127,7 @@ def main():
     """
     # Load images
     ######################## CHANGE HERE BASED ON THE FOLDER ########################
-    img_dir = os.path.join("data", "TinyAgri", "Crops", "scene2")
+    img_dir = os.path.join("data", "TinyAgri", "Tomatoes", "scene2")
 
     images = load_images(img_dir, start_idx=0)
     print(f"Loaded {len(images)} images from {img_dir}")
@@ -168,7 +168,7 @@ def main():
     line_points = np.zeros((len(masks), 11), dtype=object)
     
     ############################## CHANGE ALSO HERE BASED ON THE FOLDER ###############################
-    output_dir = os.path.join('data', 'masks', 'Crops', 'scene2')
+    output_dir = os.path.join('data', 'masks', 'Tomatoes', 'scene2')
 
     for mask_idx, (mask, orig_idx) in enumerate(zip(masks, original_indices)):
         v_point, sampled_points = process_mask(mask, orig_idx, output_dir)  # Use original index for naming
@@ -179,7 +179,7 @@ def main():
 
     # Save results
     ############################## CHANGE ALSO HERE BASED ON THE FOLDER ###############################
-    csv_filepath = os.path.join("data", "csv", "line_points_cs2.csv")
+    csv_filepath = os.path.join("data", "csv", "line_points_ts2.csv")
     save_line_points_csv(line_points, csv_filepath)
 
 if __name__ == "__main__":

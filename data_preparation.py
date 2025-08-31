@@ -6,11 +6,14 @@ and organizes them into a structured format for model training.
 The script:
 1. Imports images and corresponding masks from different scenes
 2. Resizes the images and masks to 64x48 pixels
-3. Saves the processed data in an organized directory structure
+3. Maintains strict image-mask pair associations throughout processing
+4. Randomly divides the data into 70/20/10 splits for training/validation/testing
+5. Ensures consistent naming and pairing in the output directory structure
 """
 
 import os
 import cv2
+import random
 from glob import glob
 
 
@@ -49,20 +52,15 @@ def process_data(img_folder, mask_folder, folder_idx):
     img_files = sorted(glob(os.path.join(img_folder, "*.png")))
     print(f"Found {len(img_files)} images in {img_folder}")
     
-    # Get all mask files (for debugging)
-    mask_files = sorted(glob(os.path.join(mask_folder, "*.png")))
-    print(f"Found {len(mask_files)} masks in {mask_folder}")
-    
     pairs = []
+    processed_count = 0
     
-    # if the image has a corresponding mask, then process them
+    # Process each image if it has a corresponding mask
     for img_path in img_files:
-        
         # Get the image name
         img_name = os.path.basename(img_path) 
         
         try:
-                        
             # This line extracts the frame number from the image filename
             # Split at 'frame' and take the second part 
             # then split at '.' to get the number (first part)
@@ -87,15 +85,20 @@ def process_data(img_folder, mask_folder, folder_idx):
                     # reshape the mask from 640x480
                     mask_resized = cv2.resize(mask, (64, 48))
                     
-                    # format the name as frame{i}_{j}.png
-                    formatted_name = f"frame{folder_idx}_{frame_num}.png"
+                    # format the name with a consistent pattern that includes folder index and sequence number
+                    # to ensure unique and consistent pairing
+                    formatted_name = f"frame{folder_idx}_{processed_count:04d}.png"
                     
                     # associate the image with the mask and formatted name
                     pairs.append((img_resized, mask_resized, formatted_name))
-                    print(f"Processed image {frame_num}")
+                    processed_count += 1
+                    
+                    # Print progress for every 10th image or the last one
+                    if processed_count % 10 == 0 or processed_count == len(img_files):
+                        print(f"Processed {processed_count}/{len(img_files)} images from {img_folder}")
                     
                 else:
-                    print(f"something went wrong with {img_name}")
+                    print(f"Failed to read image or mask for {img_name}")
                 
             else:
                 print(f"Mask not found for image {frame_num}")
@@ -112,125 +115,63 @@ data.extend(process_data(f2, m2, 2))
 data.extend(process_data(f3, m3, 3))
 data.extend(process_data(f4, m4, 4))
 
+print(f"Total processed image-mask pairs: {len(data)}")
 
-# put them in the same folder
-for i, (img, mask, name) in enumerate(data):
-    
-    # name is formatted as frame{i}_{j}.png
-    # remove the last 4 characters to get the base name (.png)
-    base_name = os.path.join(output_dir, name[:-4])
-    
-    # Save the processed image
-    img_path = os.path.join(output_dir, f"{base_name}.png")
-    cv2.imwrite(img_path, img)
-    
-    # Save the processed mask
-    mask_path = os.path.join(output_dir, f"{base_name}_mask.png")
-    cv2.imwrite(mask_path, mask)
+# Shuffle the data to randomize before splitting
+random.shuffle(data)
 
-
-# Create img and mask subdirectories
-img_dir = os.path.join(output_dir, "img")
-mask_dir = os.path.join(output_dir, "mask")
-if not os.path.exists(img_dir):
-    os.makedirs(img_dir)
-if not os.path.exists(mask_dir):
-    os.makedirs(mask_dir)
-
-for i, (img, mask, name) in enumerate(data):
-    # Save the processed image
-    img_path = os.path.join(output_dir, "img", name)  # Use name directly
-    cv2.imwrite(img_path, img)
-    
-    # Save the processed mask
-    mask_name = name.replace(".png", "_mask.png")  # Append "_mask" to the name
-    mask_path = os.path.join(output_dir, "mask", mask_name)
-    cv2.imwrite(mask_path, mask)
-    
-    print(f"Saving image to: {img_path}")
-    print(f"Saving mask to: {mask_path}")
-
-
-print(f"Processed {len(data)} image-mask pairs and saved to {output_dir}")
-
-# Add code to randomly divide the data into 70/20/10 splits
-import random
-import shutil
-
-# Create split directories with img and mask subfolders
+# Define splits
 split_dirs = {
-    "70": 0.7,  # 70% of the data
-    "20": 0.2,  # 20% of the data
-    "10": 0.1   # 10% of the data
+    "train": 0.7,  # 70% of the data for training
+    "val": 0.2,    # 20% of the data for validation
+    "test": 0.1    # 10% of the data for testing
 }
 
-# Create the split directories
-for split_name in split_dirs.keys():
-    split_dir = os.path.join(output_dir, split_name)
-    
-    # Create img and mask subdirectories
-    split_img_dir = os.path.join(split_dir, "img")
-    split_mask_dir = os.path.join(split_dir, "mask")
-    if not os.path.exists(split_img_dir):
-        os.makedirs(split_img_dir)
-    if not os.path.exists(split_mask_dir):
-        os.makedirs(split_mask_dir)
-
-# Get all image file names (without paths)
-all_img_files = [f for f in os.listdir(img_dir) if f.endswith(".png")]
-print(f"Total image files found: {len(all_img_files)}")
-
-# Verify that each image has a corresponding mask
-valid_pairs = []
-for img_file in all_img_files:
-    mask_file = img_file.replace(".png", "_mask.png")
-    mask_path = os.path.join(mask_dir, mask_file)
-    
-    if os.path.exists(mask_path):
-        valid_pairs.append((img_file, mask_file))
-    else:
-        print(f"Warning: Mask not found for image {img_file}, excluding from split")
-
-print(f"Total valid image-mask pairs: {len(valid_pairs)}")
-
-# Shuffle the pairs to randomize
-random.shuffle(valid_pairs)
-
-# Calculate the number of pairs for each split
-total_pairs = len(valid_pairs)
+# Calculate number of samples for each split
+total_samples = len(data)
 split_counts = {
-    split_name: int(percentage * total_pairs)
+    split_name: int(percentage * total_samples)
     for split_name, percentage in split_dirs.items()
 }
 
-# Adjust the counts if they don't sum up to total_pairs due to rounding
+# Adjust counts if they don't sum up to total_samples due to rounding
 sum_counts = sum(split_counts.values())
-if sum_counts < total_pairs:
-    # Add the remaining pairs to the 70% split
-    split_counts["70"] += (total_pairs - sum_counts)
+if sum_counts < total_samples:
+    # Add the remaining pairs to the training split
+    split_counts["train"] += (total_samples - sum_counts)
 
-# Keep track of current position in the shuffled list
+    # Create directories for each split
+for split_name in split_dirs.keys():
+    # Create img and mask subdirectories in one step
+    os.makedirs(os.path.join(output_dir, split_name, "img"), exist_ok=True)
+    os.makedirs(os.path.join(output_dir, split_name, "mask"), exist_ok=True)# Partition the data into splits
 current_idx = 0
+processed_count = 0
+total_count = sum(split_counts.values())
 
-# Copy files to their respective split directories
 for split_name, count in split_counts.items():
-    print(f"Copying {count} image-mask pairs to {split_name}% split")
+    print(f"Allocating {count} image-mask pairs to {split_name} split")
     
-    # Get the subset of pairs for this split
-    split_pairs = valid_pairs[current_idx:current_idx + count]
+    # Get the subset for this split
+    split_data = data[current_idx:current_idx + count]
     current_idx += count
     
-    for img_file, mask_file in split_pairs:
-        # Source paths
-        src_img_path = os.path.join(img_dir, img_file)
-        src_mask_path = os.path.join(mask_dir, mask_file)
+    # Save the image-mask pairs for this split
+    for img, mask, name in split_data:
+        # Save image and mask with consistent naming
+        cv2.imwrite(os.path.join(output_dir, split_name, "img", name), img)
+        cv2.imwrite(os.path.join(output_dir, split_name, "mask", name.replace(".png", "_mask.png")), mask)
         
-        # Destination paths
-        dst_img_path = os.path.join(output_dir, split_name, "img", img_file)
-        dst_mask_path = os.path.join(output_dir, split_name, "mask", mask_file)
-        
-        # Copy the files
-        shutil.copy2(src_img_path, dst_img_path)
-        shutil.copy2(src_mask_path, dst_mask_path)
+        processed_count += 1
+        # Print progress periodically
+        if processed_count % 20 == 0 or processed_count == total_count:
+            print(f"Progress: {processed_count}/{total_count} pairs saved ({(processed_count/total_count)*100:.1f}%)")
 
-print(f"Data split complete: 70% ({split_counts['70']} files), 20% ({split_counts['20']} files), 10% ({split_counts['10']} files)")
+# Create a summary of the splits
+print("\nData split summary:")
+for split_name, count in split_counts.items():
+    img_count = len(os.listdir(os.path.join(output_dir, split_name, "img")))
+    mask_count = len(os.listdir(os.path.join(output_dir, split_name, "mask")))
+    print(f"{split_name}: {count} pairs ({img_count} images, {mask_count} masks)")
+
+print("\nData preparation complete!")

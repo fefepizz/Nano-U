@@ -14,6 +14,7 @@ which is optimized for mobile and edge devices. The conversion process includes:
 import os
 import torch
 import tensorflow as tf
+import onnx
 from models.Nano_U import Nano_U
 import onnx2tf
 
@@ -143,7 +144,7 @@ if __name__ == "__main__":
     # Define file paths
     pth_model_path = "models/Nano_U.pth"
     onnx_model_path = "models/Nano_U.onnx"
-    tflite_model_path = "models/Nano_U_quantized.tflite"
+    tflite_model_path = "models/Nano_U_int8.tflite"
 
     # Step 1: Load the PyTorch model
     model = load_model(pth_model_path)

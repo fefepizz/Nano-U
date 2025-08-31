@@ -81,18 +81,18 @@ def process_mask(mask, mask_index, output_dir):
         if 0 < val < min_val:
             min_val = val
             
-    # Save the mask regardless of validation for debugging
-    os.makedirs(output_dir, exist_ok=True)
-    mask_filepath = os.path.join(output_dir, f'mask{mask_index}.png')
-    cv2.imwrite(mask_filepath, mask * 255)
-    print(f"Mask {mask_index} saved to: {mask_filepath}")
-    
     # Validate mask based on minimum value and mean
     # Stricter validation criteria
     mask_mean = np.mean(mask)
     if not (40 < min_val < height - 40 and mask_mean > 0.20):
-        print(f"Mask {mask_index}: No valid points found (min_val={min_val}, mean={mask_mean:.3f})")
+        print(f"Mask {mask_index}: No valid points found (min_val={min_val}, mean={mask_mean:.3f}) - Not saving")
         return None, None
+        
+    # Only save the mask if it passes validation
+    os.makedirs(output_dir, exist_ok=True)
+    mask_filepath = os.path.join(output_dir, f'mask{mask_index}.png')
+    cv2.imwrite(mask_filepath, mask * 255)
+    print(f"Mask {mask_index} saved to: {mask_filepath}")
     
     # Find the median x coordinate for points at minimum y value
     indices = [i for i, val in enumerate(last_points) if val == min_val]
@@ -127,7 +127,7 @@ def main():
     """
     # Load images
     ######################## CHANGE HERE BASED ON THE FOLDER ########################
-    img_dir = os.path.join("data", "TinyAgri", "Tomatoes", "scene2")
+    img_dir = os.path.join("data", "TinyAgri", "Crops", "scene2")
 
     images = load_images(img_dir, start_idx=0)
     print(f"Loaded {len(images)} images from {img_dir}")
@@ -139,15 +139,13 @@ def main():
     # Load the SAM2.1 large model
     sam = build_sam2_hf(model_id="facebook/sam2.1-hiera-large", device=device)
     
-        # Configure mask generator with parameters suitable for ground segmentation
-    # Using less strict parameters for better mask detection
     mask_gen = SAM2AutomaticMaskGenerator(
         sam,
-        points_per_side=24,           # Keeping the same point density
-        pred_iou_thresh=0.75,         # Lower threshold to allow more predictions
-        stability_score_thresh=0.80,  # Lower threshold to include more masks
-        stability_score_offset=0.85,  # Lower offset for better mask detection
-        min_mask_region_area=4000     # Keeping the same minimum area
+        points_per_side=24,           # Low point density
+        pred_iou_thresh=0.75,         # Low threshold to allow more predictions
+        stability_score_thresh=0.80,  # Low threshold to include more masks
+        stability_score_offset=0.85,  # Low offset for better mask detection
+        min_mask_region_area=4000     # High minimum area
     )
 
     sam.to(device=device)
@@ -170,7 +168,7 @@ def main():
     line_points = np.zeros((len(masks), 11), dtype=object)
     
     ############################## CHANGE ALSO HERE BASED ON THE FOLDER ###############################
-    output_dir = os.path.join('data', 'masks', 'Tomatoes', 'scene2')
+    output_dir = os.path.join('data', 'masks', 'Crops', 'scene2')
 
     for mask_idx, (mask, orig_idx) in enumerate(zip(masks, original_indices)):
         v_point, sampled_points = process_mask(mask, orig_idx, output_dir)  # Use original index for naming
@@ -181,7 +179,7 @@ def main():
 
     # Save results
     ############################## CHANGE ALSO HERE BASED ON THE FOLDER ###############################
-    csv_filepath = os.path.join("data", "csv", "line_points_ts2.csv")
+    csv_filepath = os.path.join("data", "csv", "line_points_cs2.csv")
     save_line_points_csv(line_points, csv_filepath)
 
 if __name__ == "__main__":

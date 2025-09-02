@@ -10,6 +10,7 @@
 
 # Escludi tutte le immagini
 *.png
+!/data/metrics/
 
 # Escludi i frame e le mask (mantengo i data processati)
 /data/TinyAgri/

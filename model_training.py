@@ -1,5 +1,5 @@
 """
-Model Training Script for Nano-U
+Model Training Script for Nano-U and BU_Net
 
 This script handles the training of neural network models for navigation tasks.
 It supports both standard training and knowledge distillation, where a smaller
@@ -21,7 +21,7 @@ import tqdm
 import matplotlib.pyplot as plt
 
 from models.BU_Net import BU_Net
-from models.Nano_U import Nano_U
+from models.Nano_U import Nano_A, Nano_U
 
 from utils.LoadDataset import LoadDataset
 from utils.metrics import plot_metrics, plot_prediction
@@ -245,7 +245,7 @@ if __name__ == '__main__':
     torch.save(trained_unet.state_dict(), 'models/BU_Net.pth')
     print("BU_Net weights saved to models/BU_Net.pth")
 
-    """
+    
     # Load Nano_U as student
     student_model = Nano_U(n_channels=3)
     student_model = student_model.to(device, memory_format=torch.channels_last)
@@ -264,6 +264,28 @@ if __name__ == '__main__':
 
     # Train Nano-U with distillation from BU_Net
     trained_model = train(student_model, device, criterion, epochs=80, learning_rate=1e-6, batch_size=8, teacher_model=teacher_model, distill_alpha=0.5, distill_temp=2.0)
+    torch.save(trained_model.state_dict(), 'models/Nano-U.pth')
+    print("Nano-U (student) weights saved to models/Nano-U.pth")
+    """
+    
+    # Load Nano_U as student
+    student_model = Nano_U(n_channels=3)
+    student_model = student_model.to(device, memory_format=torch.channels_last)
+    
+    # Load BU_Net as teacher
+    teacher_model = BU_Net(n_channels=3)
+    teacher_weights_path = 'models/BU_Net.pth'
+    teacher_model.load_state_dict(torch.load(teacher_weights_path, map_location=device))
+    teacher_model = teacher_model.to(device, memory_format=torch.channels_last)
+    teacher_model.eval()
+    for p in teacher_model.parameters():
+        p.requires_grad = False
+
+    # Define loss function
+    criterion = nn.BCEWithLogitsLoss()
+
+    # Train Nano-U with distillation from BU_Net
+    trained_model = train(student_model, device, criterion, epochs=90, learning_rate=1e-6, batch_size=8, teacher_model=teacher_model, distill_alpha=0.5, distill_temp=2.0)
     torch.save(trained_model.state_dict(), 'models/Nano-U.pth')
     print("Nano-U (student) weights saved to models/Nano-U.pth")
     

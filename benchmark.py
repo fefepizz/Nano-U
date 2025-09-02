@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 import tensorflow as tf
 
 from models.BU_Net.BU_Net_model import BU_Net
-from models.Nano_U.Nano_U_model import Nano_U
+from models.Nano_U.Nano_A_model import Nano_A
 from utils.LoadDataset import LoadDataset
 
 def get_model_parameters(model):
@@ -314,7 +314,7 @@ def benchmark_inference(model, dataloader, device, model_type='pytorch', verbose
                     if model_type == 'pytorch':
                         peak_ram_usage = sum(p.nelement() * p.element_size() for p in model.parameters()) / 1024
                     else:
-                        model_file_size = os.path.getsize(nano_u_tflite_path) / 1024
+                        model_file_size = os.path.getsize(nano_a_tflite_path) / 1024
                         peak_ram_usage = model_file_size
                 
                 rams_used.append(peak_ram_usage)
@@ -323,7 +323,7 @@ def benchmark_inference(model, dataloader, device, model_type='pytorch', verbose
                 if model_type == 'pytorch':
                     rams_used.append(sum(p.nelement() * p.element_size() for p in model.parameters()) / 1024)
                 else:
-                    model_file_size = os.path.getsize(nano_u_tflite_path) / 1024
+                    model_file_size = os.path.getsize(nano_a_tflite_path) / 1024
                     rams_used.append(model_file_size)
             
             # Process CPU measurements
@@ -441,7 +441,7 @@ def plot_results(results):
                     gt_mask = (example['target'][0] > 0.5).float().numpy()
                     
                     # Prepare prediction mask based on model type
-                    if model_name == 'Nano_U_int8':
+                    if model_name == 'Nano_A_int8':
                         pred_probs = torch.sigmoid(example['output'][0])
                         pred_np = pred_probs.numpy()
                         
@@ -522,19 +522,19 @@ if __name__ == '__main__':
     
     # Define model paths
     bu_net_path = os.path.join(MODELS_DIR, "BU_Net.pth")
-    nano_u_path = os.path.join(MODELS_DIR, "Nano_U.pth")
-    nano_u_tflite_path = os.path.join(MODELS_DIR, "Nano_U_int8.tflite")
+    nano_a_path = os.path.join(MODELS_DIR, "Nano_A.pth")
+    nano_a_tflite_path = os.path.join(MODELS_DIR, "Nano_A_int8.tflite")
 
     # Load models
     print("Loading PyTorch models...")
     bu_net = BU_Net(n_channels=3)
     bu_net.load_state_dict(torch.load(bu_net_path, map_location=DEVICE))
 
-    nano_u = Nano_U(n_channels=3)
-    nano_u.load_state_dict(torch.load(nano_u_path, map_location=DEVICE))
+    nano_a = Nano_A(n_channels=3)
+    nano_a.load_state_dict(torch.load(nano_a_path, map_location=DEVICE))
 
     print("Loading TFLite model...")
-    interpreter = tf.lite.Interpreter(model_path=nano_u_tflite_path)
+    interpreter = tf.lite.Interpreter(model_path=nano_a_tflite_path)
     interpreter.allocate_tensors()
 
     # Input shape for TOPS calculation
@@ -553,27 +553,27 @@ if __name__ == '__main__':
         **benchmark_data_bu
     }
     
-    # Benchmark Nano_U
-    print("\n--- Starting Benchmark: Nano_U (PyTorch) ---")
-    benchmark_data_nano = benchmark_inference(nano_u, dataloader, DEVICE, model_type='pytorch', 
+    # Benchmark Nano_A
+    print("\n--- Starting Benchmark: Nano_A (PyTorch) ---")
+    benchmark_data_nano = benchmark_inference(nano_a, dataloader, DEVICE, model_type='pytorch', 
                                             store_examples=True, num_examples=NUM_EXAMPLES)
-    nano_u_tops = calculate_tops(nano_u, input_shape, benchmark_data_nano['avg_time_ms'])
-    results['Nano_U'] = {
-        'params_m': get_model_parameters(nano_u) / 1e6,
-        'size_mb': get_model_size(nano_u_path),
-        'tops': nano_u_tops,
+    nano_a_tops = calculate_tops(nano_a, input_shape, benchmark_data_nano['avg_time_ms'])
+    results['Nano_A'] = {
+    'params_m': get_model_parameters(nano_a) / 1e6,
+    'size_mb': get_model_size(nano_a_path),
+    'tops': nano_a_tops,
         **benchmark_data_nano
     }
 
-    # Benchmark Nano_U TFLite
-    print("\n--- Starting Benchmark: Nano_U_int8 (TFLite) ---")
+    # Benchmark Nano_A TFLite
+    print("\n--- Starting Benchmark: Nano_A_int8 (TFLite) ---")
     benchmark_data_tflite = benchmark_inference(interpreter, dataloader, DEVICE, model_type='tflite', 
                                               store_examples=True, num_examples=NUM_EXAMPLES)
-    nano_u_int8_tops = calculate_tops(nano_u, input_shape, benchmark_data_tflite['avg_time_ms'])
-    results['Nano_U_int8'] = {
-        'params_m': results['Nano_U']['params_m'],
-        'size_mb': get_model_size(nano_u_tflite_path),
-        'tops': nano_u_int8_tops,
+    nano_a_int8_tops = calculate_tops(nano_a, input_shape, benchmark_data_tflite['avg_time_ms'])
+    results['Nano_A_int8'] = {
+    'params_m': results['Nano_A']['params_m'],
+    'size_mb': get_model_size(nano_a_tflite_path),
+    'tops': nano_a_int8_tops,
         **benchmark_data_tflite
     }
     

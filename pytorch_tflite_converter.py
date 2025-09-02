@@ -15,7 +15,7 @@ import os
 import torch
 import tensorflow as tf
 import onnx
-from models.Nano_U import Nano_U
+from models.Nano_U import Nano_A, Nano_U
 import onnx2tf
 
 
@@ -141,24 +141,24 @@ if __name__ == "__main__":
     4. Apply dynamic quantization to TensorFlow model and save as TFLite
     5. Verify the quantized model works correctly
     """
-    # Define file paths
+    # Define file paths for Nano_U
     pth_model_path = "models/Nano_U.pth"
     onnx_model_path = "models/Nano_U.onnx"
     tflite_model_path = "models/Nano_U_int8.tflite"
 
-    # Step 1: Load the PyTorch model
+    # Step 1: Load the PyTorch Nano_U model
     model = load_model(pth_model_path)
-    
+
     # Step 2: Export to ONNX format
     export_to_onnx(model, onnx_model_path)
-    
+
     # Step 3: Convert ONNX to TensorFlow format
     tf_model_path = convert_onnx_to_tf(onnx_model_path)
-    
+
     # Step 4: Apply dynamic quantization and save as TFLite
     apply_dynamic_quantization(tf_model_path, tflite_model_path)
-    
+
     # Step 5: Verify the quantized model
     verify_quantized_model(tflite_model_path)
-    
+
     print(f"Conversion completed: {pth_model_path} -> {tflite_model_path}")

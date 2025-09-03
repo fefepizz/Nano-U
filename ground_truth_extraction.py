@@ -82,8 +82,8 @@ def process_mask(mask, mask_index, output_dir):
             min_val = val
             
     # Validate mask based on minimum value and mean
-    # Stricter validation criteria
     mask_mean = np.mean(mask)
+    # vanishing is expected to be in this range
     if not (40 < min_val < height - 40 and mask_mean > 0.20):
         print(f"Mask {mask_index}: No valid points found (min_val={min_val}, mean={mask_mean:.3f}) - Not saving")
         return None, None

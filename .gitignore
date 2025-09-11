@@ -1,8 +1,8 @@
 # Escludi i file e le cartelle di VS Code
 .vscode/
 
-# Escludi gli ambienti virtuali di Python
-# metto ambiente 
+# Escludi altri file di configurazione dell'IDE
+__pycache__/
 
 # Escludi tutti i modelli tranne Nano-U
 /models/*

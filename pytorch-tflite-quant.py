@@ -56,17 +56,59 @@ model = ModelWrapper(model)
 sample_input = (torch.randn(1, 48, 64, 3),)
 
 
+def load_validation_data():
+    """
+    Load validation images and convert them to NHWC format for TFLite quantization.
+    Returns a list of validation images in the correct format.
+    """
+    import os
+    import cv2
+    
+    val_img_dir = "data/processed_data/val/img"
+    val_img_files = sorted([os.path.join(val_img_dir, f) for f in os.listdir(val_img_dir) if f.endswith(".png")])
+    
+    print(f"Loading {len(val_img_files)} validation images from {val_img_dir}")
+    
+    validation_images = []
+    for i, img_path in enumerate(val_img_files[:100]):  # Use first 100 images for quantization
+        # Load image using cv2 (same as LoadDataset)
+        img = cv2.imread(img_path)  # BGR format
+        if img is not None:
+            # Convert BGR to RGB (same as LoadDataset)
+            img = img[:, :, ::-1]
+            # Normalize to [0, 1] range (same as LoadDataset)
+            img = img.astype(np.float32) / 255.0
+            # Add batch dimension and ensure NHWC format
+            img = np.expand_dims(img, axis=0)  # Shape: (1, 48, 64, 3)
+            validation_images.append(img)
+            
+            # Log first image for debugging
+            if i == 0:
+                print(f"First validation image shape: {img.shape}")
+                print(f"First validation image dtype: {img.dtype}")
+                print(f"First validation image range: [{img.min():.3f}, {img.max():.3f}]")
+        else:
+            print(f"Warning: Could not load image {img_path}")
+    
+    print(f"Successfully loaded {len(validation_images)} validation images for quantization")
+    return validation_images
+
+
 def representative_dataset_gen():
     """
-    Generator function for the representative dataset.
+    Generator function for the representative dataset using real validation data.
     This dataset is used by the TFLite converter to calibrate the quantization
-    parameters for the model's weights and activations. It should yield a
-    list of input tensors that are representative of the data the model will
-    see during inference.
+    parameters for the model's weights and activations. It yields validation
+    images that are representative of the data the model will see during inference.
     """
-    for _ in range(100):
-        # Create a random input tensor with the NHWC shape.
-        yield [np.random.rand(1, 48, 64, 3).astype(np.float32)]
+    print("Loading validation data for quantization calibration...")
+    validation_images = load_validation_data()
+    
+    print(f"Using {len(validation_images)} validation images for representative dataset")
+    for i, img in enumerate(validation_images):
+        if i == 0:
+            print(f"Representative dataset - First image shape: {img.shape}, dtype: {img.dtype}")
+        yield [img]
 
 
 # These flags control the optimization and conversion process.

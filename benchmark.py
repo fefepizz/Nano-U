@@ -1,615 +1,395 @@
 import os
 import time
 import torch
-import torch.nn as nn
 import numpy as np
-import matplotlib.pyplot as plt
 import cv2
 import gc
 from torch.utils.data import DataLoader
 import tensorflow as tf
+import matplotlib.pyplot as plt
 
 from models.BU_Net.BU_Net_model import BU_Net
 from models.Nano_U.Nano_U_model import Nano_U
 from utils.LoadDataset import LoadDataset
 
 def clear_memory():
-    """Clear memory and run garbage collection."""
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
 def get_model_parameters(model_info):
-    """Calculate the number of trainable parameters in a model.
-    
-    Args:
-        model_info: Dict containing model info with 'model' and 'type' keys
-    
-    Returns:
-        Number of parameters
-    """
     if model_info['type'] == 'pytorch':
         return sum(p.numel() for p in model_info['model'].parameters() if p.requires_grad)
-    elif model_info['type'] == 'tflite':
-        # For TFLite, we need to estimate from the PyTorch equivalent if available
-        # or return 0 if we can't determine
-        return model_info.get('pytorch_params', 0)
-    return 0
+    return model_info.get('pytorch_params', 0)
 
 def get_model_size(model_path):
-    """Get the file size of a model in kilobytes (KB)."""
     return os.path.getsize(model_path) / 1024
 
-def measure_inference_time(model_info, dataloader, device, num_warmup=5, num_iterations=None):
-    """Measure inference time for a model.
+def _run_tflite_inference(interpreter, image, target=None):
+    input_details = interpreter.get_input_details()
+    output_details = interpreter.get_output_details()
+    expected_shape = input_details[0]['shape']
     
-    Args:
-        model_info: Dict with 'model', 'type', and other model information
-        dataloader: PyTorch DataLoader
-        device: Device to run inference on
-        num_warmup: Number of warmup iterations
-        num_iterations: Number of iterations to measure (None = all data)
+    img_np = image.cpu().numpy()
+    input_data = np.zeros(expected_shape, dtype=np.float32)
     
-    Returns:
-        List of inference times in seconds
-    """
+    # Convert NCHW to NHWC
+    for b in range(min(img_np.shape[0], expected_shape[0])):
+        for c in range(min(img_np.shape[1], expected_shape[3])):
+            resized = cv2.resize(img_np[b, c], (expected_shape[2], expected_shape[1]), cv2.INTER_AREA)
+            input_data[b, :, :, c] = resized
+    
+    # Handle quantization
+    if input_details[0]['dtype'] in [np.uint8, np.int8]:
+        input_scale, input_zero_point = input_details[0]['quantization']
+        input_data = np.round(input_data / input_scale + input_zero_point).astype(input_details[0]['dtype'])
+    
+    interpreter.set_tensor(input_details[0]['index'], input_data)
+    interpreter.invoke()
+    output_data = interpreter.get_tensor(output_details[0]['index'])
+    
+    if target is None:
+        return output_data
+    
+    # Dequantize if needed
+    if output_details[0]['dtype'] == np.uint8:
+        output_scale, output_zero_point = output_details[0]['quantization']
+        output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
+    
+    # Resize to match target
+    output_processed = np.zeros((target.shape[0], target.shape[1], target.shape[2], target.shape[3]), dtype=np.float32)
+    
+    if len(output_data.shape) == 4:  # NHWC
+        for b in range(min(output_data.shape[0], target.shape[0])):
+            for c in range(min(output_data.shape[3], target.shape[1])):
+                resized = cv2.resize(output_data[b, :, :, c], (target.shape[3], target.shape[2]), cv2.INTER_LINEAR)
+                output_processed[b, c] = resized
+    else:  # NHW
+        for b in range(min(output_data.shape[0], target.shape[0])):
+            resized = cv2.resize(output_data[b], (target.shape[3], target.shape[2]), cv2.INTER_LINEAR)
+            output_processed[b, 0] = resized
+    
+    return torch.from_numpy(output_processed).to(target.device)
+
+def measure_inference_time(model_info, dataloader, device, num_warmup=5):
     times = []
     model = model_info['model']
     model_type = model_info['type']
     
     if model_type == 'pytorch':
-        model.to(device)
-        model.eval()
+        model.to(device).eval()
     
-    print(f"Running {num_warmup} warm-up iterations...")
-    clear_memory()
-    
-    # Warm-up runs
+    # Warmup
     for _ in range(num_warmup):
         image, _ = next(iter(dataloader))
         if model_type == 'pytorch':
             with torch.no_grad():
                 _ = model(image.to(device))
-        elif model_type == 'tflite':
+        else:
             _run_tflite_inference(model, image)
-        clear_memory()
-    
-    print("Measuring inference times...")
-    iteration_count = 0
     
     with torch.no_grad():
         for image, _ in dataloader:
-            if num_iterations and iteration_count >= num_iterations:
-                break
-                
             image = image.to(device)
+            start = time.time()
             
-            start_time = time.time()
             if model_type == 'pytorch':
                 _ = model(image)
-            elif model_type == 'tflite':
+            else:
                 _run_tflite_inference(model, image)
-            end_time = time.time()
-            
-            times.append(end_time - start_time)
-            iteration_count += 1
+                
+            times.append(time.time() - start)
     
     return times
 
-
-def measure_accuracy(model_info, dataloader, device, num_iterations=None):
-    """Measure model accuracy using IoU metric and cross entropy accuracy.
-    
-    Args:
-        model_info: Dict with 'model', 'type', and other model information
-        dataloader: PyTorch DataLoader
-        device: Device to run inference on
-        num_iterations: Number of iterations to measure (None = all data)
-    
-    Returns:
-        Tuple of (List of IoU scores, List of cross entropy accuracies)
-    """
-    ious = []
-    ce_accuracies = []
+def measure_accuracy(model_info, dataloader, device):
+    ious, ce_accuracies = [], []
     model = model_info['model']
     model_type = model_info['type']
     
     if model_type == 'pytorch':
-        model.to(device)
-        model.eval()
-    
-    iteration_count = 0
+        model.to(device).eval()
     
     with torch.no_grad():
         for image, target in dataloader:
-            if num_iterations and iteration_count >= num_iterations:
-                break
-                
-            image = image.to(device)
-            target = target.to(device)
+            image, target = image.to(device), target.to(device)
             
             if model_type == 'pytorch':
                 output = model(image)
-            elif model_type == 'tflite':
-                output = _run_tflite_inference_with_target(model, image, target)
+            else:
+                output = _run_tflite_inference(model, image, target)
             
-            # Calculate IoU
-            current_iou = calculate_iou(output, target)
-            ious.append(current_iou)
+            # IoU
+            pred = (output > 0.5).float()
+            intersection = (pred * target).sum()
+            union = pred.sum() + target.sum() - intersection
+            ious.append(((intersection + 1e-6) / (union + 1e-6)).item())
             
-            # Calculate cross entropy accuracy
-            current_ce_acc = calculate_cross_entropy_accuracy(output, target)
-            ce_accuracies.append(current_ce_acc)
+            # Cross entropy accuracy
+            if output.max() > 1.0 or output.min() < 0.0:
+                pred_probs = torch.sigmoid(output)
+            else:
+                pred_probs = output
             
-            iteration_count += 1
+            target_binary = (target > 0.5).float()
+            pred_probs = torch.clamp(pred_probs, 1e-7, 1 - 1e-7)
+            
+            ce_loss = -(target_binary * torch.log(pred_probs) + (1 - target_binary) * torch.log(1 - pred_probs))
+            mean_ce_loss = ce_loss.mean().item()
+            ce_accuracies.append(max(0, 1 - (mean_ce_loss / np.log(2))))
     
     return ious, ce_accuracies
 
-def collect_examples(model_info, dataloader, device, num_examples=3):
-    """Collect example predictions for visualization.
+def benchmark_model(model_info, dataloader, device):
+    print(f"Benchmarking {model_info.get('name', 'Unknown')}...")
     
-    Args:
-        model_info: Dict with 'model', 'type', and other model information
-        dataloader: PyTorch DataLoader
-        device: Device to run inference on
-        num_examples: Number of examples to collect
+    times = measure_inference_time(model_info, dataloader, device)
+    ious, ce_accuracies = measure_accuracy(model_info, dataloader, device)
     
-    Returns:
-        List of example dictionaries
-    """
-    examples = []
+    return {
+        "avg_time_ms": np.mean(times) * 1000,
+        "avg_iou": np.mean(ious),
+        "avg_ce_accuracy": np.mean(ce_accuracies),
+        "size_kb": get_model_size(model_info['path']),
+        "params_m": get_model_parameters(model_info) / 1e6
+    }
+
+def get_single_prediction(model_info, image, target, device):
+    """Get prediction from a single model"""
     model = model_info['model']
     model_type = model_info['type']
     
     if model_type == 'pytorch':
-        model.to(device)
-        model.eval()
-    
-    example_count = 0
-    
-    with torch.no_grad():
-        for image, target in dataloader:
-            if example_count >= num_examples:
-                break
-                
+        model.to(device).eval()
+        with torch.no_grad():
             image = image.to(device)
-            target = target.to(device)
-            
-            if model_type == 'pytorch':
-                output = model(image)
-            elif model_type == 'tflite':
-                output = _run_tflite_inference_with_target(model, image, target)
-            
-            # Calculate IoU for this example
-            current_iou = calculate_iou(output, target)
-            
-            examples.append({
-                'image': image.clone().detach().cpu(),
-                'target': target.clone().detach().cpu(),
-                'output': output.clone().detach().cpu(),
-                'iou': current_iou
-            })
-            example_count += 1
-    
-    return examples
-
-def _run_tflite_inference(interpreter, image):
-    """Helper function to run TFLite inference."""
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-    expected_shape = input_details[0]['shape']
-    
-    # Process input data
-    img_np = image.cpu().numpy()
-    input_data = np.zeros(expected_shape, dtype=np.float32)
-    
-    # Convert from NCHW to NHWC and resize
-    for b in range(min(img_np.shape[0], expected_shape[0])):
-        for c in range(min(img_np.shape[1], expected_shape[3])):
-            original = img_np[b, c]
-            resized = cv2.resize(original, (expected_shape[2], expected_shape[1]),
-                               interpolation=cv2.INTER_AREA)
-            input_data[b, :, :, c] = resized
-    
-    # Handle quantization
-    if input_details[0]['dtype'] == np.uint8:
-        input_scale, input_zero_point = input_details[0]['quantization']
-        input_data = np.round(input_data / input_scale + input_zero_point).astype(np.uint8)
-    elif input_details[0]['dtype'] == np.int8:
-        input_scale, input_zero_point = input_details[0]['quantization']
-        input_data = np.round(input_data / input_scale + input_zero_point).astype(np.int8)
-    
-    # Run inference
-    interpreter.set_tensor(input_details[0]['index'], input_data)
-    interpreter.invoke()
-    
-    return interpreter.get_tensor(output_details[0]['index'])
-
-def _run_tflite_inference_with_target(interpreter, image, target):
-    """Helper function to run TFLite inference and process output to match target format."""
-    input_details = interpreter.get_input_details()
-    output_details = interpreter.get_output_details()
-    expected_shape = input_details[0]['shape']
-    
-    # Process input data
-    img_np = image.cpu().numpy()
-    input_data = np.zeros(expected_shape, dtype=np.float32)
-    
-    # Convert from NCHW to NHWC and resize
-    for b in range(min(img_np.shape[0], expected_shape[0])):
-        for c in range(min(img_np.shape[1], expected_shape[3])):
-            original = img_np[b, c]
-            resized = cv2.resize(original, (expected_shape[2], expected_shape[1]),
-                               interpolation=cv2.INTER_AREA)
-            input_data[b, :, :, c] = resized
-    
-    # Handle quantization
-    if input_details[0]['dtype'] == np.uint8:
-        input_scale, input_zero_point = input_details[0]['quantization']
-        input_data = np.round(input_data / input_scale + input_zero_point).astype(np.uint8)
-    elif input_details[0]['dtype'] == np.int8:
-        input_scale, input_zero_point = input_details[0]['quantization']
-        input_data = np.round(input_data / input_scale + input_zero_point).astype(np.int8)
-    
-    # Run inference
-    interpreter.set_tensor(input_details[0]['index'], input_data)
-    interpreter.invoke()
-    output_data = interpreter.get_tensor(output_details[0]['index'])
-    
-    # Handle dequantization
-    if output_details[0]['dtype'] == np.uint8:
-        output_scale, output_zero_point = output_details[0]['quantization']
-        output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
-    
-    # Process output to match target format
-    output_processed = np.zeros((target.shape[0], target.shape[1], target.shape[2], target.shape[3]), 
-                               dtype=np.float32)
-    
-    if len(output_data.shape) == 4:  # NHWC format
-        for b in range(min(output_data.shape[0], target.shape[0])):
-            for c in range(min(output_data.shape[3], target.shape[1])):
-                output_slice = output_data[b, :, :, c]
-                target_h, target_w = target.shape[2], target.shape[3]
-                resized_slice = cv2.resize(output_slice, (target_w, target_h),
-                                         interpolation=cv2.INTER_LINEAR)
-                output_processed[b, c] = resized_slice
-    elif len(output_data.shape) == 3:  # NHW format
-        for b in range(min(output_data.shape[0], target.shape[0])):
-            output_slice = output_data[b]
-            target_h, target_w = target.shape[2], target.shape[3]
-            resized_slice = cv2.resize(output_slice, (target_w, target_h),
-                                     interpolation=cv2.INTER_LINEAR)
-            output_processed[b, 0] = resized_slice
-    
-    return torch.from_numpy(output_processed).to(target.device)
-
-def calculate_iou(pred, target, threshold=0.5):
-    """Calculate the Intersection over Union (IoU) for segmentation evaluation."""
-    pred = (pred > threshold).float()
-    intersection = (pred * target).sum()
-    union = pred.sum() + target.sum() - intersection
-    iou = (intersection + 1e-6) / (union + 1e-6)
-    return iou.item()
-
-def calculate_cross_entropy_accuracy(pred, target):
-    """Calculate accuracy using cross entropy loss for segmentation.
-    
-    Args:
-        pred: Predicted logits or probabilities
-        target: Ground truth binary mask
-    
-    Returns:
-        Accuracy value (1 - normalized_cross_entropy)
-    """
-    # Apply sigmoid to get probabilities if pred contains logits
-    if pred.max() > 1.0 or pred.min() < 0.0:
-        pred_probs = torch.sigmoid(pred)
+            output = model(image)
+            return output.cpu().numpy()
     else:
-        pred_probs = pred
-    
-    # Ensure target is binary (0 or 1)
-    target_binary = (target > 0.5).float()
-    
-    # Calculate cross entropy loss manually to avoid numerical issues
-    # CE = -[y*log(p) + (1-y)*log(1-p)]
-    eps = 1e-7  # Small epsilon to avoid log(0)
-    pred_probs = torch.clamp(pred_probs, eps, 1 - eps)
-    
-    ce_loss = -(target_binary * torch.log(pred_probs) + 
-                (1 - target_binary) * torch.log(1 - pred_probs))
-    
-    # Calculate mean cross entropy loss
-    mean_ce_loss = ce_loss.mean().item()
-    
-    # Convert to accuracy: higher accuracy = lower loss
-    # Normalize by maximum possible loss (ln(2) ≈ 0.693 for binary classification)
-    max_loss = np.log(2)
-    accuracy = max(0, 1 - (mean_ce_loss / max_loss))
-    
-    return accuracy
+        output = _run_tflite_inference(model, image, target)
+        return output.cpu().numpy()
 
-def benchmark_model(model_info, dataloader, device, store_examples=False, num_examples=3):
-    """Comprehensive benchmark of a model using separate measurement functions.
+def process_frame(target_frame, target_mask, models, device, data_dir):
+    """Process a single frame and return the figure"""
+    # Load specific frame
+    img_path = os.path.join(data_dir, "img", target_frame)
+    mask_path = os.path.join(data_dir, "mask", target_mask)
     
-    Args:
-        model_info: Dict containing:
-            - 'model': The model object (PyTorch model or TFLite interpreter)
-            - 'type': 'pytorch' or 'tflite'
-            - 'path': Path to the model file
-            - 'pytorch_params': (optional) Number of PyTorch parameters for TFLite models
-        dataloader: PyTorch DataLoader
-        device: Device to run inference on
-        store_examples: Whether to collect example predictions
-        num_examples: Number of examples to collect
+    if not (os.path.exists(img_path) and os.path.exists(mask_path)):
+        print(f"Target frame {target_frame} not found!")
+        return None
     
-    Returns:
-        Dictionary containing all benchmark results
-    """
-    print(f"Benchmarking {model_info.get('name', 'Unknown')} model...")
+    # Create dataset with single image
+    dataset = LoadDataset([img_path], [mask_path])
+    image, target = dataset[0]
+    image = image.unsqueeze(0)  # Add batch dimension
+    target = target.unsqueeze(0)  # Add batch dimension
     
-    # Measure inference time
-    print("  - Measuring inference time...")
-    times = measure_inference_time(model_info, dataloader, device)
-    avg_time_ms = np.mean(times) * 1000
+    # Load original image for display
+    original_img = cv2.imread(img_path)
+    original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
     
-    # Measure accuracy
-    print("  - Measuring accuracy...")
-    ious, ce_accuracies = measure_accuracy(model_info, dataloader, device)
-    avg_iou = np.mean(ious)
-    avg_ce_accuracy = np.mean(ce_accuracies)
+    # Load ground truth mask for comparison
+    ground_truth = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+    ground_truth = (ground_truth > 127).astype(np.float32)  # Convert to binary
     
-    # Collect examples if requested
-    examples = []
-    if store_examples:
-        print(f"  - Collecting {num_examples} examples...")
-        examples = collect_examples(model_info, dataloader, device, num_examples)
-    
-    # Calculate derived metrics
-    model_size_kb = get_model_size(model_info['path'])
-    
-    return {
-        "avg_time_ms": avg_time_ms,
-        "avg_iou": avg_iou,
-        "avg_ce_accuracy": avg_ce_accuracy,
-        "examples": examples,
-        "size_kb": model_size_kb,
-        "params_m": get_model_parameters(model_info) / 1e6
-    }
-
-def plot_results(results):
-    """Generate bar charts to compare model benchmark results."""
-    model_names = list(results.keys())
-    
-    # Create performance metrics charts
-    performance_metrics = {
-        'Cross Entropy Accuracy': [v.get('avg_ce_accuracy', 0) for v in results.values()],
-        'Model Size (KB)': [v['size_kb'] for v in results.values()],
-        'Inference Time (ms)': [v['avg_time_ms'] for v in results.values()],
-    }
-    
-    fig1, axes1 = plt.subplots(1, 3, figsize=(15, 5))
-    fig1.suptitle('U-Net Models Performance Comparison', fontsize=16)
-    axes1 = axes1.flatten()
-
-    colors = ['#1f77b4', '#ff7f0e', '#2ca02c']
-    for i, (title, values) in enumerate(performance_metrics.items()):
-        bars = axes1[i].bar(model_names, values, color=colors)
-        axes1[i].set_title(title)
-        axes1[i].set_ylabel(title.split(' ')[-1].strip('()'))
-        axes1[i].tick_params(axis='x', rotation=15)
+    # Get predictions from all models
+    predictions = {}
+    for name, model_info in models.items():
+        print(f"Running inference with {model_info['name']} on {target_frame}...")
+        pred = get_single_prediction(model_info, image, target, device)
+        # Convert to binary mask and squeeze to remove batch/channel dimensions
+        pred_binary = (pred > 0.5).astype(np.float32)
+        if len(pred_binary.shape) == 4:
+            pred_binary = pred_binary[0, 0]  # Remove batch and channel dims
+        elif len(pred_binary.shape) == 3:
+            pred_binary = pred_binary[0]  # Remove batch dim
         
-        for bar in bars:
-            yval = bar.get_height()
-            axes1[i].text(bar.get_x() + bar.get_width()/2.0, yval, f'{yval:.2f}', va='bottom', ha='center',
-                         bbox=dict(facecolor='white', alpha=0.5, boxstyle='round,pad=0.2'))
-
-    plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    plt.savefig("exp/benchmark_performance.png")
-    print("\nPerformance benchmark charts saved to 'exp/benchmark_performance.png'")
-    
-    # IoU comparison chart
-    fig2, axes2 = plt.subplots(figsize=(10, 6))
-    iou_values = [v['avg_iou'] for v in results.values()]
-    
-    bars = axes2.bar(model_names, iou_values, color=colors)
-    axes2.set_title('Segmentation Accuracy (IoU)', fontsize=14)
-    axes2.set_ylabel('IoU')
-    axes2.set_ylim([0, max(iou_values) * 1.2])  # Add some space above the highest bar
-    
-    for bar in bars:
-        yval = bar.get_height()
-        axes2.text(bar.get_x() + bar.get_width()/2.0, yval, f'{yval:.4f}', va='bottom', ha='center',
-                 bbox=dict(facecolor='white', alpha=0.5, boxstyle='round,pad=0.2'))
-    
-    plt.tight_layout()
-    plt.savefig("exp/benchmark_iou.png")
-    print("IoU benchmark chart saved to 'exp/benchmark_iou.png'")
-    
-    # Example predictions visualization
-    has_examples = any(len(v.get('examples', [])) > 0 for v in results.values())
-    
-    if has_examples:
-        num_models = len(model_names)
-        num_examples = min(len(v.get('examples', [])) for v in results.values() if 'examples' in v)
+        # Resize prediction to match ground truth size
+        if pred_binary.shape != ground_truth.shape:
+            pred_binary = cv2.resize(pred_binary, (ground_truth.shape[1], ground_truth.shape[0]), interpolation=cv2.INTER_LINEAR)
         
-        if num_examples > 0:
-            fig3 = plt.figure(figsize=(15, 5 * num_examples))
-            gs = fig3.add_gridspec(num_examples, num_models)
-            
-            for i, model_name in enumerate(model_names):
-                model_examples = results[model_name].get('examples', [])
-                
-                for j in range(min(num_examples, len(model_examples))):
-                    example = model_examples[j]
-                    ax = fig3.add_subplot(gs[j, i])
-                    
-                    # Prepare image
-                    img = example['image'][0].permute(1, 2, 0).numpy()
-                    img = (img * 0.5 + 0.5).clip(0, 1)
-                    
-                    # Prepare ground truth mask
-                    gt_mask = (example['target'][0] > 0.5).float().numpy()
-                    
-                    # Prepare prediction mask based on model type
-                    if model_name == 'Nano_U_int8':
-                        pred_probs = torch.sigmoid(example['output'][0])
-                        pred_np = pred_probs.numpy()
-                        
-                        # Take first channel if needed
-                        if len(pred_np.shape) == 3:
-                            pred_np = pred_np[0]
-                        
-                        # Ensure we have a 2D mask
-                        pred_np = np.squeeze(pred_np)
-                        pred_mask = (pred_np > 0.5).astype(np.float32)
-                    else:
-                        pred_mask = (torch.sigmoid(example['output'][0]) > 0.5).float().numpy()
-                    
-                    # Create overlay
-                    h, w, _ = img.shape
-                    overlay = np.zeros((h, w, 3), dtype=np.float32)
-                    
-                    # Ensure masks have correct dimensions
-                    if len(pred_mask.shape) > 2:
-                        pred_mask = pred_mask[0]
-                    
-                    if pred_mask.shape != (h, w):
-                        pred_mask = cv2.resize(pred_mask, (w, h), interpolation=cv2.INTER_NEAREST)
-                    
-                    gt_mask_display = gt_mask[0].squeeze()
-                    if gt_mask_display.shape != (h, w):
-                        gt_mask_display = cv2.resize(gt_mask_display, (w, h), interpolation=cv2.INTER_NEAREST)
-                    
-                    # Create overlay colors
-                    overlay[(gt_mask_display > 0.5) & (pred_mask > 0.5)] = [0, 1, 0]  # True positive (green)
-                    overlay[(gt_mask_display > 0.5) & (pred_mask <= 0.5)] = [1, 1, 0]  # False negative (yellow)
-                    overlay[(gt_mask_display <= 0.5) & (pred_mask > 0.5)] = [1, 0, 0]  # False positive (red)
-                    
-                    # Display results
-                    ax.imshow(img)
-                    ax.imshow(overlay, alpha=0.5)
-                    ax.set_title(f"{model_name} - IoU: {example['iou']:.4f}")
-                    ax.axis('off')
-                    
-                    # Add legend to first row
-                    if j == 0:
-                        green_patch = plt.matplotlib.patches.Patch(color='green', label='True Positive')
-                        yellow_patch = plt.matplotlib.patches.Patch(color='yellow', label='False Negative')
-                        red_patch = plt.matplotlib.patches.Patch(color='red', label='False Positive')
-                        ax.legend(handles=[green_patch, yellow_patch, red_patch], loc='upper right', fontsize=8)
-            
-            plt.suptitle('Model Prediction Examples', fontsize=16)
-            plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-            plt.savefig("exp/benchmark_examples.png")
-            print("Example predictions saved to 'exp/benchmark_examples.png'")
+        predictions[model_info['name']] = pred_binary
+
+    def create_colored_overlay(gt_mask, pred_mask):
+        """Create colored overlay based on the template from utils/metrics.py"""
+        # Ensure masks are binary
+        gt_mask = (gt_mask > 0.5).astype(np.uint8)
+        pred_mask = (pred_mask > 0.5).astype(np.uint8)
+        
+        # Create overlay: yellow for GT only, red for prediction only, green for overlap
+        # Following the same color scheme as in utils/metrics.py plot_prediction function
+        overlay = np.zeros((*gt_mask.shape, 3), dtype=np.float32)
+        overlay[(gt_mask == 1) & (pred_mask == 0)] = [1, 1, 0]  # Yellow: GT only (False Negative)
+        overlay[(gt_mask == 0) & (pred_mask == 1)] = [1, 0, 0]  # Red: Prediction only (False Positive)
+        overlay[(gt_mask == 1) & (pred_mask == 1)] = [0, 1, 0]  # Green: Overlap (True Positive)
+        
+        return overlay
+
+    # Create matplotlib figure
+    fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+    fig.suptitle(f'Model Predictions for {target_frame}', fontsize=16, fontweight='bold')
     
-    plt.show()
+    # Original image spans middle column of top row
+    axes[0, 1].imshow(original_img)
+    axes[0, 1].set_title('Original Image', fontsize=14, fontweight='bold')
+    axes[0, 1].axis('off')
+    
+    # Hide unused top subplots
+    axes[0, 0].axis('off')
+    axes[0, 2].axis('off')
+    
+    # Model predictions in bottom row with colored overlays
+    model_names = list(predictions.keys())
+    for i, name in enumerate(model_names):
+        if i < 3:  # Ensure we don't exceed the number of available subplots
+            overlay = create_colored_overlay(ground_truth, predictions[name])
+            axes[1, i].imshow(overlay)
+            axes[1, i].set_title(f'{name}\n(Yellow=GT only, Red=Pred only, Green=Overlap)', fontsize=10, fontweight='bold')
+            axes[1, i].axis('off')
+    
+    return fig
 
 if __name__ == '__main__':
-    # Create exp directory if it doesn't exist
     os.makedirs("exp", exist_ok=True)
-
-    IMG_SIZE = (256, 256)
-    BATCH_SIZE = 1
+    
     DEVICE = "cpu"
-    MODELS_DIR = "models"
     DATA_DIR = "data/processed_data/test"
-    NUM_EXAMPLES = 3  # Number of example predictions to show for each model
     
-    print(f"Loading dataset from: {DATA_DIR}")
+    # Define frames to process
+    frames_to_process = [
+        ("frame1_0381.png", "frame1_0381_mask.png"),
+        ("frame4_0280.png", "frame4_0280_mask.png")
+    ]
     
-    # Load dataset
-    img_dir = os.path.join(DATA_DIR, "img")
-    mask_dir = os.path.join(DATA_DIR, "mask")
-    
-    img_files = sorted([os.path.join(img_dir, f) for f in os.listdir(img_dir) if f.endswith(".png")])
-    mask_files = sorted([os.path.join(mask_dir, f) for f in os.listdir(mask_dir) if f.endswith(".png")])
-    
-    dataset = LoadDataset(img_files, mask_files)
-    dataloader = DataLoader(dataset, batch_size=BATCH_SIZE)
-    
-    # Check image dimensions
-    sample_img, sample_mask = next(iter(dataloader))
-    print(f"Sample image shape from dataloader: {sample_img.shape}")
-    print(f"Sample mask shape from dataloader: {sample_mask.shape}")
-    
-    # Define model paths
-    bu_net_path = os.path.join(MODELS_DIR, "BU_Net.pth")
-    nano_u_2l_path = os.path.join(MODELS_DIR, "Nano_U_2L.pth")
-    provissima2_tflite_path = os.path.join(MODELS_DIR, "provissima2.tflite")
-
-    # Load models
-    print("Loading PyTorch models...")
+    # Load models once
     bu_net = BU_Net(n_channels=3)
-    bu_net.load_state_dict(torch.load(bu_net_path, map_location=DEVICE))
-
-    nano_u_2l = Nano_U(n_channels=3) # Assuming Nano_U can be instantiated like this for Nano_U_2L
-    nano_u_2l.load_state_dict(torch.load(nano_u_2l_path, map_location=DEVICE))
-
-    print("Loading TFLite model...")
-    interpreter = tf.lite.Interpreter(model_path=provissima2_tflite_path)
+    bu_net.load_state_dict(torch.load("models/BU_Net.pth", map_location=DEVICE))
+    
+    nano_u_2l = Nano_U(n_channels=3)
+    nano_u_2l.load_state_dict(torch.load("models/Nano_U_2L.pth", map_location=DEVICE))
+    
+    interpreter = tf.lite.Interpreter(model_path="models/Nano_U.tflite")
     interpreter.allocate_tensors()
-
-    results = {}
-
-    # Prepare model information dictionaries
-    bu_net_info = {
-        'model': bu_net,
-        'type': 'pytorch',
-        'path': bu_net_path,
-        'name': 'BU_Net'
+    
+    # Define models
+    models = {
+        'BU_Net': {'model': bu_net, 'type': 'pytorch', 'name': 'BU_Net'},
+        'Nano_U_f32': {'model': nano_u_2l, 'type': 'pytorch', 'name': 'Nano_U_f32'},
+        'Nano_U_int8': {'model': interpreter, 'type': 'tflite', 'name': 'Nano_U_int8'}
     }
     
-    nano_u_2l_info = {
-        'model': nano_u_2l,
-        'type': 'pytorch', 
-        'path': nano_u_2l_path,
-        'name': 'Nano_U_2L'
-    }
-    
-    provissima2_tflite_info = {
-        'model': interpreter,
-        'type': 'tflite',
-        'path': provissima2_tflite_path,
-        'pytorch_params': 0, # Unknown
-        'name': 'provissima2_tflite'
-    }
-
-    # Benchmark BU_Net
-    print("\n--- Starting Benchmark: BU_Net (PyTorch) ---")
-    results['BU_Net'] = benchmark_model(bu_net_info, dataloader, DEVICE, 
-                                       store_examples=True, num_examples=NUM_EXAMPLES)
-    
-    # Benchmark Nano_U_2L
-    print("\n--- Starting Benchmark: Nano_U_2L (PyTorch) ---")
-    results['Nano_U_2L'] = benchmark_model(nano_u_2l_info, dataloader, DEVICE,
-                                       store_examples=True, num_examples=NUM_EXAMPLES)
-
-    # Benchmark provissima2 TFLite
-    print("\n--- Starting Benchmark: provissima2_tflite (TFLite) ---")
-    results['provissima2_tflite'] = benchmark_model(provissima2_tflite_info, dataloader, DEVICE,
-                                            store_examples=True, num_examples=NUM_EXAMPLES)
-    
-    # Display results
-    print("\n" + "="*90)
-    print("--- FINAL BENCHMARK RESULTS ---")
-    print("="*90)
-    print(f"{'Model':<20} | {'Parameters (M)':<15} | {'Size (KB)':<10} | {'IoU':<8} | {'CE Accuracy':<12} | {'Time (ms)':<12}")
-    print("-" * 90)
-    for name, res in results.items():
-        print(f"{name:<20} | {res['params_m']:<15.2f} | {res['size_kb']:<10.2f} | {res['avg_iou']:<8.3f} | {res['avg_ce_accuracy']:<12.3f} | {res['avg_time_ms']:<12.2f}")
-    print("-" * 90)
-
-    # Analyze best/worst models
-    print("\nGenerating detailed IoU analysis and example predictions...")
-    if results:
-        models_by_iou = sorted(results.keys(), key=lambda k: results[k]['avg_iou'], reverse=True)
-        best_model = models_by_iou[0]
-        worst_model = models_by_iou[-1]
+    # Process each frame
+    for target_frame, target_mask in frames_to_process:
+        print(f"\n--- Processing {target_frame} ---")
         
-        print(f"Best IoU: {best_model} with {results[best_model]['avg_iou']:.4f}")
-        print(f"Worst IoU: {worst_model} with {results[worst_model]['avg_iou']:.4f}")
-        print(f"IoU difference: {results[best_model]['avg_iou'] - results[worst_model]['avg_iou']:.4f}")
-
-    # Generate charts
-    plot_results(results)
+        fig = process_frame(target_frame, target_mask, models, DEVICE, DATA_DIR)
+        
+        if fig is not None:
+            plt.tight_layout()
+            plt.subplots_adjust(top=0.92)
+            
+            # Save figure to exp directory
+            output_path = os.path.join("exp", f"predictions_{target_frame.replace('.png', '.png')}")
+            fig.savefig(output_path, dpi=300, bbox_inches='tight')
+            print(f"Visualization saved to {output_path}")
+            
+            plt.show()
+            plt.close(fig)  # Close figure to free memory
+        else:
+            print(f"Failed to process {target_frame}")
+    
+    # Create benchmark comparison figure
+    print(f"\n--- Creating Model Comparison ---")
+    
+    # Create a simple dataset for benchmarking
+    img_files = []
+    mask_files = []
+    for frame, mask in frames_to_process:
+        img_path = os.path.join(DATA_DIR, "img", frame)
+        mask_path = os.path.join(DATA_DIR, "mask", mask)
+        if os.path.exists(img_path) and os.path.exists(mask_path):
+            img_files.append(img_path)
+            mask_files.append(mask_path)
+    
+    if img_files:
+        from torch.utils.data import DataLoader
+        dataloader = DataLoader(LoadDataset(img_files, mask_files), batch_size=1)
+        
+        # Define models with paths for size calculation
+        models_with_paths = {
+            'BU_Net': {'model': bu_net, 'type': 'pytorch', 'path': 'models/BU_Net.pth', 'name': 'BU_Net'},
+            'Nano_U_f32': {'model': nano_u_2l, 'type': 'pytorch', 'path': 'models/Nano_U_2L.pth', 'name': 'Nano_U_f32'},
+            'Nano_U_int8': {'model': interpreter, 'type': 'tflite', 'path': 'models/Nano_U.tflite', 'pytorch_params': 0, 'name': 'Nano_U_int8'}
+        }
+        
+        # Collect benchmark data
+        benchmark_data = {}
+        for name, model_info in models_with_paths.items():
+            print(f"Benchmarking {model_info['name']}...")
+            
+            # Measure inference time
+            times = measure_inference_time(model_info, dataloader, DEVICE)
+            avg_time_ms = np.mean(times) * 1000
+            
+            # Get model size
+            size_kb = get_model_size(model_info['path'])
+            
+            benchmark_data[model_info['name']] = {
+                'size_kb': size_kb,
+                'time_ms': avg_time_ms
+            }
+        
+        # Create comparison figure
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        fig.suptitle('Model Performance Comparison', fontsize=16, fontweight='bold')
+        
+        model_names = list(benchmark_data.keys())
+        sizes = [benchmark_data[name]['size_kb'] for name in model_names]
+        times = [benchmark_data[name]['time_ms'] for name in model_names]
+        
+        # Define colors for each model
+        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # Blue, Orange, Green
+        
+        # Model size comparison
+        bars1 = ax1.bar(model_names, sizes, color=colors)
+        ax1.set_ylabel('Model Size (KB)')
+        ax1.set_title('Model Size Comparison')
+        ax1.tick_params(axis='x', rotation=45)
+        
+        # Add value labels on bars
+        for bar, size in zip(bars1, sizes):
+            height = bar.get_height()
+            ax1.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                    f'{size:.1f} KB', ha='center', va='bottom', fontweight='bold')
+        
+        # Inference time comparison
+        bars2 = ax2.bar(model_names, times, color=colors)
+        ax2.set_ylabel('Inference Time (ms)')
+        ax2.set_title('Inference Time Comparison')
+        ax2.tick_params(axis='x', rotation=45)
+        
+        # Add value labels on bars
+        for bar, time in zip(bars2, times):
+            height = bar.get_height()
+            ax2.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
+                    f'{time:.2f} ms', ha='center', va='bottom', fontweight='bold')
+        
+        plt.tight_layout()
+        
+        # Save comparison figure
+        comparison_output_path = os.path.join("exp", "model_comparison.png")
+        plt.savefig(comparison_output_path, dpi=300, bbox_inches='tight')
+        print(f"Model comparison saved to {comparison_output_path}")
+        
+        plt.show()
+        plt.close(fig)
+        
+        # Print summary table
+        print("\n--- Model Performance Summary ---")
+        print(f"{'Model':<15} | {'Size (KB)':<10} | {'Time (ms)':<10}")
+        print("-" * 40)
+        for name in model_names:
+            print(f"{name:<15} | {benchmark_data[name]['size_kb']:<10.1f} | {benchmark_data[name]['time_ms']:<10.2f}")
+    
+    print("\nAll visualizations complete!")

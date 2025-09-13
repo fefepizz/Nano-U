@@ -7,6 +7,7 @@ import gc
 from torch.utils.data import DataLoader
 import tensorflow as tf
 import matplotlib.pyplot as plt
+from PIL import Image
 
 from models.BU_Net.BU_Net_model import BU_Net
 from models.Nano_U.Nano_U_model import Nano_U
@@ -167,6 +168,9 @@ def get_single_prediction(model_info, image, target, device):
             return output.cpu().numpy()
     else:
         output = _run_tflite_inference(model, image, target)
+        # TFLite inference returns a numpy array directly when target is None
+        if isinstance(output, np.ndarray):
+            return output
         return output.cpu().numpy()
 
 def process_frame(target_frame, target_mask, models, device, data_dir):
@@ -247,6 +251,115 @@ def process_frame(target_frame, target_mask, models, device, data_dir):
             axes[1, i].imshow(overlay)
             axes[1, i].set_title(f'{name}\n(Yellow=GT only, Red=Pred only, Green=Overlap)', fontsize=10, fontweight='bold')
             axes[1, i].axis('off')
+    
+    return fig
+
+def create_tflite_microflow_comparison(tflite_model_info, device, data_dir, microflow_prediction_path="../microflow_test/output/prediction_frame2.png"):
+    """Create a comparison figure between TFLite model and microflow implementation"""
+    target_frame = "frame2.png"
+    
+    # Check if microflow prediction exists
+    if not os.path.exists(microflow_prediction_path):
+        print(f"Microflow prediction not found at {microflow_prediction_path}")
+        return None
+    
+    # Try to find frame2.png in test data or examples
+    img_path = os.path.join(data_dir, "img", target_frame)
+    if not os.path.exists(img_path):
+        # Try in microflow examples
+        img_path = "../microflow_test/examples/frame2.png"
+        if not os.path.exists(img_path):
+            print(f"Frame2.png not found in test data or microflow examples")
+            return None
+
+    # Use the same logic as in process_frame to generate the TFLite prediction
+    mask_path = img_path.replace("img", "mask")
+    dataset = LoadDataset([img_path], [mask_path])
+    image, target = dataset[0]
+    image = image.unsqueeze(0)  # Add batch dimension
+    target = target.unsqueeze(0)  # Add batch dimension
+
+    print(f"Running inference with {tflite_model_info['name']} on {target_frame}...")
+    tflite_pred = get_single_prediction(tflite_model_info, image, target, device)
+    tflite_pred_binary = (tflite_pred > 0.5).astype(np.float32)
+    if len(tflite_pred_binary.shape) == 4:
+        tflite_pred_binary = tflite_pred_binary[0, 0]  # Remove batch and channel dims
+    elif len(tflite_pred_binary.shape) == 3:
+        tflite_pred_binary = tflite_pred_binary[0]  # Remove batch dim
+    # Resize prediction to match original image size (done later if needed)
+    
+    # Load original image for display
+    original_img = cv2.imread(img_path)
+    if original_img is None:
+        print(f"Could not load image from {img_path}")
+        return None
+    original_img = cv2.cvtColor(original_img, cv2.COLOR_BGR2RGB)
+    
+    # Load microflow prediction
+    microflow_pred = cv2.imread(microflow_prediction_path, cv2.IMREAD_GRAYSCALE)
+    if microflow_pred is None:
+        print(f"Could not load microflow prediction from {microflow_prediction_path}")
+        return None
+    
+    # Convert microflow prediction to binary (assuming it's a grayscale mask)
+    microflow_pred = (microflow_pred > 127).astype(np.float32)
+    
+    # Resize predictions to match original image size
+    target_height, target_width = original_img.shape[:2]
+    
+    if tflite_pred_binary.shape != (target_height, target_width):
+        tflite_pred_binary = cv2.resize(tflite_pred_binary, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+    
+    if microflow_pred.shape != (target_height, target_width):
+        microflow_pred = cv2.resize(microflow_pred, (target_width, target_height), interpolation=cv2.INTER_LINEAR)
+    
+    def create_comparison_overlay(pred1, pred2):
+        """Create colored overlay comparing two predictions"""
+        # Ensure predictions are binary
+        pred1 = (pred1 > 0.5).astype(np.uint8)
+        pred2 = (pred2 > 0.5).astype(np.uint8)
+        
+        # Create overlay: blue for TFLite only, orange for microflow only, purple for overlap
+        overlay = np.zeros((*pred1.shape, 3), dtype=np.float32)
+        overlay[(pred1 == 1) & (pred2 == 0)] = [0, 0, 1]      # Blue: TFLite only
+        overlay[(pred1 == 0) & (pred2 == 1)] = [1, 0.5, 0]    # Orange: Microflow only
+        overlay[(pred1 == 1) & (pred2 == 1)] = [0.5, 0, 0.5]  # Purple: Both predictions
+        
+        return overlay
+    
+    # Create matplotlib figure
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    fig.suptitle('TFLite vs Microflow Implementation Comparison - Frame2', fontsize=16, fontweight='bold')
+    
+    # Original image
+    axes[0, 0].imshow(original_img)
+    axes[0, 0].set_title('Original Image', fontsize=14, fontweight='bold')
+    axes[0, 0].axis('off')
+    
+    # TFLite prediction
+    axes[0, 1].imshow(tflite_pred_binary, cmap='gray')
+    axes[0, 1].set_title('TFLite Model Prediction', fontsize=14, fontweight='bold')
+    axes[0, 1].axis('off')
+    
+    # Microflow prediction
+    axes[1, 0].imshow(microflow_pred, cmap='gray')
+    axes[1, 0].set_title('Microflow Implementation Prediction', fontsize=14, fontweight='bold')
+    axes[1, 0].axis('off')
+    
+    # Comparison overlay
+    overlay = create_comparison_overlay(tflite_pred_binary, microflow_pred)
+    axes[1, 1].imshow(overlay)
+    axes[1, 1].set_title('Comparison Overlay\n(Blue=TFLite only, Orange=Microflow only, Purple=Both)', fontsize=12, fontweight='bold')
+    axes[1, 1].axis('off')
+    
+    # Calculate and display metrics
+    intersection = np.sum((tflite_pred_binary > 0.5) & (microflow_pred > 0.5))
+    union = np.sum((tflite_pred_binary > 0.5) | (microflow_pred > 0.5))
+    iou = intersection / union if union > 0 else 0
+    
+    # Add metrics text
+    metrics_text = f'IoU between predictions: {iou:.4f}'
+    fig.text(0.5, 0.02, metrics_text, ha='center', fontsize=12, fontweight='bold')
     
     return fig
 
@@ -391,5 +504,23 @@ if __name__ == '__main__':
         print("-" * 40)
         for name in model_names:
             print(f"{name:<15} | {benchmark_data[name]['size_kb']:<10.1f} | {benchmark_data[name]['time_ms']:<10.2f}")
+    
+    # Create TFLite vs Microflow comparison
+    print(f"\n--- Creating TFLite vs Microflow Comparison ---")
+    tflite_model_info = models_with_paths['Nano_U_int8']
+    comparison_fig = create_tflite_microflow_comparison(tflite_model_info, DEVICE, DATA_DIR)
+    
+    if comparison_fig is not None:
+        plt.tight_layout()
+        
+        # Save comparison figure
+        comparison_output_path = os.path.join("exp", "tflite_vs_microflow_comparison.png")
+        comparison_fig.savefig(comparison_output_path, dpi=300, bbox_inches='tight')
+        print(f"TFLite vs Microflow comparison saved to {comparison_output_path}")
+        
+        plt.show()
+        plt.close(comparison_fig)
+    else:
+        print("Failed to create TFLite vs Microflow comparison")
     
     print("\nAll visualizations complete!")

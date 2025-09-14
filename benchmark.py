@@ -9,6 +9,58 @@ import tensorflow as tf
 import matplotlib.pyplot as plt
 from PIL import Image
 
+def compute_iou(pred, mask):
+    pred_bin = (pred > 0.5).astype(np.uint8)
+    mask_bin = (mask > 0.5).astype(np.uint8)
+    intersection = np.sum((pred_bin == 1) & (mask_bin == 1))
+    union = np.sum((pred_bin == 1) | (mask_bin == 1))
+    return intersection / union if union > 0 else 0
+
+def microflow_vs_tflite_iou_plot(microflow_dir, mask_dir, tflite_mean_iou):
+    # Gather all microflow prediction files
+    pred_files = sorted([f for f in os.listdir(microflow_dir) if f.endswith('.png')])
+    ious_microflow = []
+    for idx, pred_file in enumerate(pred_files):
+        # Determine mask file name
+        base = pred_file.replace('prediction_', '').replace('.png', '')
+        mask_file = f"{base}_mask.png"
+        mask_path = os.path.join(mask_dir, mask_file)
+        pred_path = os.path.join(microflow_dir, pred_file)
+        if not os.path.exists(mask_path):
+            continue
+        # Read prediction and mask
+        pred = cv2.imread(pred_path, cv2.IMREAD_GRAYSCALE)
+        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+        if pred is None or mask is None:
+            continue
+        pred = (pred > 127).astype(np.float32)
+        mask = (mask > 127).astype(np.float32)
+        # Resize pred to mask if needed
+        if pred.shape != mask.shape:
+            pred = cv2.resize(pred, (mask.shape[1], mask.shape[0]), interpolation=cv2.INTER_LINEAR)
+        # Microflow IoU
+        microflow_iou = compute_iou(pred, mask)
+        ious_microflow.append(microflow_iou)
+    if len(ious_microflow) == 0:
+        print("No valid microflow/mask pairs found!")
+        return
+    # Plot only microflow IoUs
+    plt.figure(figsize=(12,6))
+    microflow_indices = [i for i, v in enumerate(ious_microflow) if not np.isnan(v)]
+    microflow_values = [v for v in ious_microflow if not np.isnan(v)]
+    plt.plot(microflow_indices, microflow_values, label='Microflow IoU', marker='o', linestyle='-', markersize=6, color='blue')
+    microflow_mean = float(np.nanmean(ious_microflow))
+    plt.axhline(y=microflow_mean, color='b', linestyle=':', label=f'Microflow Mean IoU = {microflow_mean:.4f}')
+    plt.xlabel('Sample Index')
+    plt.ylabel('IoU')
+    plt.title('IoU for Microflow Predictions')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig('exp/iou_microflow_vs_tflite.png', dpi=300)
+    print('IoU plot for microflow saved to exp/iou_microflow_vs_tflite.png')
+    plt.show()
+
 from models.BU_Net.BU_Net_model import BU_Net
 from models.Nano_U.Nano_U_model import Nano_U
 from utils.LoadDataset import LoadDataset
@@ -53,7 +105,7 @@ def _run_tflite_inference(interpreter, image, target=None):
         return output_data
     
     # Dequantize if needed
-    if output_details[0]['dtype'] == np.uint8:
+    if output_details[0]['dtype'] in [np.uint8, np.int8]:
         output_scale, output_zero_point = output_details[0]['quantization']
         output_data = (output_data.astype(np.float32) - output_zero_point) * output_scale
     
@@ -63,11 +115,25 @@ def _run_tflite_inference(interpreter, image, target=None):
     if len(output_data.shape) == 4:  # NHWC
         for b in range(min(output_data.shape[0], target.shape[0])):
             for c in range(min(output_data.shape[3], target.shape[1])):
-                resized = cv2.resize(output_data[b, :, :, c], (target.shape[3], target.shape[2]), cv2.INTER_LINEAR)
+                if (output_data.shape[1] == 0 or output_data.shape[2] == 0 or 
+                    target.shape[2] == 0 or target.shape[3] == 0):
+                    resized = np.zeros((target.shape[2], target.shape[3]), dtype=np.float32)
+                else:
+                    try:
+                        resized = cv2.resize(output_data[b, :, :, c], (target.shape[3], target.shape[2]), cv2.INTER_AREA)
+                    except cv2.error:
+                        resized = np.zeros((target.shape[2], target.shape[3]), dtype=np.float32)
                 output_processed[b, c] = resized
     else:  # NHW
         for b in range(min(output_data.shape[0], target.shape[0])):
-            resized = cv2.resize(output_data[b], (target.shape[3], target.shape[2]), cv2.INTER_LINEAR)
+            if (output_data.shape[1] == 0 or output_data.shape[2] == 0 or 
+                target.shape[2] == 0 or target.shape[3] == 0):
+                resized = np.zeros((target.shape[2], target.shape[3]), dtype=np.float32)
+            else:
+                try:
+                    resized = cv2.resize(output_data[b], (target.shape[3], target.shape[2]), cv2.INTER_AREA)
+                except cv2.error:
+                    resized = np.zeros((target.shape[2], target.shape[3]), dtype=np.float32)
             output_processed[b, 0] = resized
     
     return torch.from_numpy(output_processed).to(target.device)
@@ -117,11 +183,10 @@ def measure_accuracy(model_info, dataloader, device):
             
             if model_type == 'pytorch':
                 output = model(image)
+                pred = (torch.sigmoid(output) > 0.5).float()
             else:
                 output = _run_tflite_inference(model, image, target)
-            
-            # IoU
-            pred = (output > 0.5).float()
+                pred = (output > 0.5).float()
             intersection = (pred * target).sum()
             union = pred.sum() + target.sum() - intersection
             ious.append(((intersection + 1e-6) / (union + 1e-6)).item())
@@ -369,158 +434,87 @@ if __name__ == '__main__':
     DEVICE = "cpu"
     DATA_DIR = "data/processed_data/test"
     
-    # Define frames to process
-    frames_to_process = [
-        ("frame1_0381.png", "frame1_0381_mask.png"),
-        ("frame4_0280.png", "frame4_0280_mask.png")
-    ]
+    # Load all test images and masks
+    img_dir = os.path.join(DATA_DIR, "img")
+    mask_dir = os.path.join(DATA_DIR, "mask")
     
-    # Load models once
+    img_files = sorted([os.path.join(img_dir, f) for f in os.listdir(img_dir) if f.endswith('.png')])
+    mask_files = []
+    valid_img_files = []
+    
+    for img_path in img_files:
+        img_name = os.path.basename(img_path)
+        base = img_name.replace('.png', '')
+        mask_name = f"{base}_mask.png"
+        mask_path = os.path.join(mask_dir, mask_name)
+        if os.path.exists(mask_path):
+            valid_img_files.append(img_path)
+            mask_files.append(mask_path)
+    
+    print(f"Found {len(valid_img_files)} valid image/mask pairs in test set")
+    
+    # Create dataloader
+    from utils.LoadDataset import LoadDataset
+    dataset = LoadDataset(valid_img_files, mask_files)
+    dataloader = DataLoader(dataset, batch_size=1, shuffle=False)
+    
+    # Load models
+    print("Loading models...")
+    
+    # BU_Net
     bu_net = BU_Net(n_channels=3)
     bu_net.load_state_dict(torch.load("models/BU_Net.pth", map_location=DEVICE))
     
-    nano_u_2l = Nano_U(n_channels=3)
-    nano_u_2l.load_state_dict(torch.load("models/Nano_U_2L.pth", map_location=DEVICE))
+    # Nano_U (using 2L version as float32)
+    nano_u = Nano_U(n_channels=3)
+    nano_u.load_state_dict(torch.load("models/Nano_U_2L.pth", map_location=DEVICE))
     
-    interpreter = tf.lite.Interpreter(model_path="models/Nano_U.tflite")
-    interpreter.allocate_tensors()
+    # Nano_U_int8 (TFLite quantized)
+    interpreter_int8 = tf.lite.Interpreter(model_path="models/Nano_U_int8.tflite")
+    interpreter_int8.allocate_tensors()
     
     # Define models
     models = {
-        'BU_Net': {'model': bu_net, 'type': 'pytorch', 'name': 'BU_Net'},
-        'Nano_U_f32': {'model': nano_u_2l, 'type': 'pytorch', 'name': 'Nano_U_f32'},
-        'Nano_U_int8': {'model': interpreter, 'type': 'tflite', 'name': 'Nano_U_int8'}
+        'BU_Net': {
+            'model': bu_net, 
+            'type': 'pytorch', 
+            'path': 'models/BU_Net.pth', 
+            'name': 'BU_Net'
+        },
+        'Nano_U': {
+            'model': nano_u, 
+            'type': 'pytorch', 
+            'path': 'models/Nano_U_2L.pth', 
+            'name': 'Nano_U'
+        },
+        'Nano_U_int8': {
+            'model': interpreter_int8, 
+            'type': 'tflite', 
+            'path': 'models/Nano_U_int8.tflite', 
+            'pytorch_params': 0, 
+            'name': 'Nano_U_int8'
+        }
     }
     
-    # Process each frame
-    for target_frame, target_mask in frames_to_process:
-        print(f"\n--- Processing {target_frame} ---")
-        
-        fig = process_frame(target_frame, target_mask, models, DEVICE, DATA_DIR)
-        
-        if fig is not None:
-            plt.tight_layout()
-            plt.subplots_adjust(top=0.92)
-            
-            # Save figure to exp directory
-            output_path = os.path.join("exp", f"predictions_{target_frame.replace('.png', '.png')}")
-            fig.savefig(output_path, dpi=300, bbox_inches='tight')
-            print(f"Visualization saved to {output_path}")
-            
-            plt.show()
-            plt.close(fig)  # Close figure to free memory
-        else:
-            print(f"Failed to process {target_frame}")
+    # Calculate IoU for each model
+    print("\nCalculating IoU on test set...")
+    results = {}
     
-    # Create benchmark comparison figure
-    print(f"\n--- Creating Model Comparison ---")
+    for model_name, model_info in models.items():
+        print(f"\nBenchmarking {model_name}...")
+        benchmark_result = benchmark_model(model_info, dataloader, DEVICE)
+        results[model_name] = benchmark_result
+        print(f"{model_name} - Average IoU: {benchmark_result['avg_iou']:.4f}")
     
-    # Create a simple dataset for benchmarking
-    img_files = []
-    mask_files = []
-    for frame, mask in frames_to_process:
-        img_path = os.path.join(DATA_DIR, "img", frame)
-        mask_path = os.path.join(DATA_DIR, "mask", mask)
-        if os.path.exists(img_path) and os.path.exists(mask_path):
-            img_files.append(img_path)
-            mask_files.append(mask_path)
+    # Print summary
+    print("\n" + "="*50)
+    print("IoU RESULTS SUMMARY")
+    print("="*50)
+    print(f"{'Model':<15} | {'Avg IoU':<10} | {'Avg Time (ms)':<15} | {'Size (KB)':<10}")
+    print("-" * 55)
+    for model_name in ['BU_Net', 'Nano_U', 'Nano_U_int8']:
+        if model_name in results:
+            result = results[model_name]
+            print(f"{model_name:<15} | {result['avg_iou']:<10.4f} | {result['avg_time_ms']:<15.2f} | {result['size_kb']:<10.1f}")
     
-    if img_files:
-        from torch.utils.data import DataLoader
-        dataloader = DataLoader(LoadDataset(img_files, mask_files), batch_size=1)
-        
-        # Define models with paths for size calculation
-        models_with_paths = {
-            'BU_Net': {'model': bu_net, 'type': 'pytorch', 'path': 'models/BU_Net.pth', 'name': 'BU_Net'},
-            'Nano_U_f32': {'model': nano_u_2l, 'type': 'pytorch', 'path': 'models/Nano_U_2L.pth', 'name': 'Nano_U_f32'},
-            'Nano_U_int8': {'model': interpreter, 'type': 'tflite', 'path': 'models/Nano_U.tflite', 'pytorch_params': 0, 'name': 'Nano_U_int8'}
-        }
-        
-        # Collect benchmark data
-        benchmark_data = {}
-        for name, model_info in models_with_paths.items():
-            print(f"Benchmarking {model_info['name']}...")
-            
-            # Measure inference time
-            times = measure_inference_time(model_info, dataloader, DEVICE)
-            avg_time_ms = np.mean(times) * 1000
-            
-            # Get model size
-            size_kb = get_model_size(model_info['path'])
-            
-            benchmark_data[model_info['name']] = {
-                'size_kb': size_kb,
-                'time_ms': avg_time_ms
-            }
-        
-        # Create comparison figure
-        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
-        fig.suptitle('Model Performance Comparison', fontsize=16, fontweight='bold')
-        
-        model_names = list(benchmark_data.keys())
-        sizes = [benchmark_data[name]['size_kb'] for name in model_names]
-        times = [benchmark_data[name]['time_ms'] for name in model_names]
-        
-        # Define colors for each model
-        colors = ['#1f77b4', '#ff7f0e', '#2ca02c']  # Blue, Orange, Green
-        
-        # Model size comparison
-        bars1 = ax1.bar(model_names, sizes, color=colors)
-        ax1.set_ylabel('Model Size (KB)')
-        ax1.set_title('Model Size Comparison')
-        ax1.tick_params(axis='x', rotation=45)
-        
-        # Add value labels on bars
-        for bar, size in zip(bars1, sizes):
-            height = bar.get_height()
-            ax1.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
-                    f'{size:.1f} KB', ha='center', va='bottom', fontweight='bold')
-        
-        # Inference time comparison
-        bars2 = ax2.bar(model_names, times, color=colors)
-        ax2.set_ylabel('Inference Time (ms)')
-        ax2.set_title('Inference Time Comparison')
-        ax2.tick_params(axis='x', rotation=45)
-        
-        # Add value labels on bars
-        for bar, time in zip(bars2, times):
-            height = bar.get_height()
-            ax2.text(bar.get_x() + bar.get_width()/2., height + height*0.01,
-                    f'{time:.2f} ms', ha='center', va='bottom', fontweight='bold')
-        
-        plt.tight_layout()
-        
-        # Save comparison figure
-        comparison_output_path = os.path.join("exp", "model_comparison.png")
-        plt.savefig(comparison_output_path, dpi=300, bbox_inches='tight')
-        print(f"Model comparison saved to {comparison_output_path}")
-        
-        plt.show()
-        plt.close(fig)
-        
-        # Print summary table
-        print("\n--- Model Performance Summary ---")
-        print(f"{'Model':<15} | {'Size (KB)':<10} | {'Time (ms)':<10}")
-        print("-" * 40)
-        for name in model_names:
-            print(f"{name:<15} | {benchmark_data[name]['size_kb']:<10.1f} | {benchmark_data[name]['time_ms']:<10.2f}")
-    
-    # Create TFLite vs Microflow comparison
-    print(f"\n--- Creating TFLite vs Microflow Comparison ---")
-    tflite_model_info = models_with_paths['Nano_U_int8']
-    comparison_fig = create_tflite_microflow_comparison(tflite_model_info, DEVICE, DATA_DIR)
-    
-    if comparison_fig is not None:
-        plt.tight_layout()
-        
-        # Save comparison figure
-        comparison_output_path = os.path.join("exp", "tflite_vs_microflow_comparison.png")
-        comparison_fig.savefig(comparison_output_path, dpi=300, bbox_inches='tight')
-        print(f"TFLite vs Microflow comparison saved to {comparison_output_path}")
-        
-        plt.show()
-        plt.close(comparison_fig)
-    else:
-        print("Failed to create TFLite vs Microflow comparison")
-    
-    print("\nAll visualizations complete!")
+    print("\nIoU calculation complete!")

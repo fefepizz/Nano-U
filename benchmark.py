@@ -467,7 +467,7 @@ if __name__ == '__main__':
     
     # Nano_U (using 2L version as float32)
     nano_u = Nano_U(n_channels=3)
-    nano_u.load_state_dict(torch.load("models/Nano_U_2L.pth", map_location=DEVICE))
+    nano_u.load_state_dict(torch.load("models/Nano_U.pth", map_location=DEVICE))
     
     # Nano_U_int8 (TFLite quantized)
     interpreter_int8 = tf.lite.Interpreter(model_path="models/Nano_U_int8.tflite")

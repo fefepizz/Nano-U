@@ -40,7 +40,16 @@ def compute_loss(outputs, labels, criterion, distillation=False, teacher_outputs
     loss_stud = criterion(outputs, labels)
     # Distillation loss: MSE between student and teacher outputs
     mse_loss = torch.nn.MSELoss()
+    """
+    # The temperature parameter is not implemented yet.
     loss_teacher = mse_loss(torch.sigmoid(outputs), torch.sigmoid(teacher_outputs))
+    """
+    # to implement temperature scaling, uncomment the following lines and adjust the loss calculation:
+    # Apply temperature to soften outputs for distillation
+    student_soft = torch.sigmoid(outputs / temperature)
+    teacher_soft = torch.sigmoid(teacher_outputs / temperature)
+    loss_teacher = mse_loss(student_soft, teacher_soft)
+    
     return alpha * loss_stud + (1 - alpha) * loss_teacher
 
 def train(model, device, criterion, epochs: int=1, learning_rate: float=1e-5, batch_size: int=1, teacher_model=None, distill_alpha=0.5, distill_temp=2.0):

@@ -19,5 +19,5 @@
 
 # Escludi i file di Cargo tranne main.rs e Cargo.toml
 /MicroFlow_implementation/*
-!/MicroFlow_implementation/src/main.rs
+!/MicroFlow_implementation/src/*
 !/MicroFlow_implementation/Cargo.toml

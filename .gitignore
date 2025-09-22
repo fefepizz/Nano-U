@@ -1,13 +1,13 @@
 # Escludi i file e le cartelle di VS Code
-.vscode/
+/.vscode/
 
 # Escludi altri file di configurazione dell'IDE
-__pycache__/
+/__pycache__/
 
 # Escludi tutti i modelli tranne Nano-U
 /models/*
 !/models/Nano-U/
-tf_model/
+/tf_model/
 
 # Escludi tutte le immagini
 *.png

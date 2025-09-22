@@ -16,3 +16,7 @@ tf_model/
 # Escludi i frame e le mask (mantengo i data processati)
 /data/TinyAgri/
 /data/masks/
+
+/microflow_test/*
+!/microflow_test/src/main.rs
+!/microflow_test/Cargo.toml

@@ -2,7 +2,8 @@
 /.vscode/
 
 # Escludi altri file di configurazione dell'IDE
-/__pycache__/
+**/__pycache__/
+*.pyc
 
 # Escludi tutti i modelli tranne Nano-U
 /models/*
@@ -19,5 +20,6 @@
 
 # Escludi i file di Cargo tranne main.rs e Cargo.toml
 /MicroFlow_implementation/*
-!/MicroFlow_implementation/src/*
+!/MicroFlow_implementation/src/
+!/MicroFlow_implementation/src/main.rs
 !/MicroFlow_implementation/Cargo.toml
